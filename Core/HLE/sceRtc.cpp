@@ -16,7 +16,8 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #ifdef _WIN32
-#include <windows.h>
+#include "Common/CommonWindows.h"
+#include <Winsock2.h>
 #else
 #include <sys/time.h>
 #endif
@@ -24,16 +25,24 @@
 #include <time.h>
 #include "base/timeutil.h"
 
-#include "HLE.h"
-#include "../MIPS/MIPS.h"
+#include "Core/HLE/HLE.h"
+#include "Core/MIPS/MIPS.h"
+#include "Core/Reporting.h"
+#include "Core/CoreTiming.h"
 
-#include "sceKernel.h"
-#include "sceRtc.h"
-#include "../CoreTiming.h"
+#include "Core/HLE/sceKernel.h"
+#include "Core/HLE/sceRtc.h"
+
+// This is a base time that everything is relative to.
+// This way, time doesn't move strangely with savestates, turbo speed, etc.
+static PSPTimeval rtcBaseTime;
+static u64 rtcBaseTicks;
 
 // Grabbed from JPSCP
-// This is # of microseconds between January 1, 0001 and January 1, 1970.
-const u64 rtcMagicOffset = 62135596800000000L;
+// This is the # of microseconds between January 1, 0001 and January 1, 1970.
+const u64 rtcMagicOffset = 62135596800000000ULL;
+// This is the # of microseconds between January 1, 0001 and January 1, 1601 (for Win32 FILETIME.)
+const u64 rtcFiletimeOffset = 50491123200000000ULL;
 
 const int PSP_TIME_INVALID_YEAR = -1;
 const int PSP_TIME_INVALID_MONTH = -2;
@@ -46,11 +55,11 @@ const int PSP_TIME_INVALID_MICROSECONDS = -7;
 u64 __RtcGetCurrentTick()
 {
 	// TODO: It's probably expecting ticks since January 1, 0001?
-	return cyclesToUs(CoreTiming::GetTicks()) + rtcMagicOffset;
+	return CoreTiming::GetGlobalTimeUs() + rtcBaseTicks;
 }
 
-#ifdef _WIN32
-#define FILETIME_FROM_UNIX_EPOCH_US 11644473600000000ULL
+#if defined(_WIN32)
+#define FILETIME_FROM_UNIX_EPOCH_US (rtcMagicOffset - rtcFiletimeOffset)
 
 void gettimeofday(timeval *tv, void *ignore)
 {
@@ -64,7 +73,71 @@ void gettimeofday(timeval *tv, void *ignore)
 	tv->tv_sec = long(from_1970_us / 1000000UL);
 	tv->tv_usec = from_1970_us % 1000000UL;
 }
+
+time_t rtc_timegm(struct tm *tm)
+{
+	return _mkgmtime(tm);
+}
+
+#elif (defined(__GLIBC__) && !defined(ANDROID)) || defined(BLACKBERRY) || defined(__SYMBIAN32__)
+#define rtc_timegm timegm
+#else
+
+time_t rtc_timegm(struct tm *tm)
+{
+	time_t ret;
+	char *tz;
+	std::string tzcopy;
+
+	tz = getenv("TZ");
+	if (tz)
+		tzcopy = tz;
+
+	setenv("TZ", "", 1);
+	tzset();
+	ret = mktime(tm);
+	if (tz)
+		setenv("TZ", tzcopy.c_str(), 1);
+	else
+		unsetenv("TZ");
+	tzset();
+	return ret;
+}
+
 #endif
+
+void __RtcInit()
+{
+	// This is the base time, the only case we use gettimeofday() for.
+	// Everything else is relative to that, "virtual time."
+	timeval tv;
+	gettimeofday(&tv, NULL);
+	rtcBaseTime.tv_sec = tv.tv_sec;
+	rtcBaseTime.tv_usec = tv.tv_usec;
+	// Precalculate the current time in microseconds (rtcMagicOffset is offset to 1970.)
+	rtcBaseTicks = 1000000ULL * rtcBaseTime.tv_sec + rtcBaseTime.tv_usec + rtcMagicOffset;
+}
+
+void __RtcDoState(PointerWrap &p)
+{
+	auto s = p.Section("sceRtc", 1);
+	if (!s)
+		return;
+
+	p.Do(rtcBaseTime);
+	// Update the precalc, pointless to savestate this as it's just based on the other value.
+	rtcBaseTicks = 1000000ULL * rtcBaseTime.tv_sec + rtcBaseTime.tv_usec + rtcMagicOffset;
+}
+
+void __RtcTimeOfDay(PSPTimeval *tv)
+{
+	s64 additionalUs = CoreTiming::GetGlobalTimeUs();
+	*tv = rtcBaseTime;
+
+	s64 adjustedUs = additionalUs + tv->tv_usec;
+	tv->tv_sec += long(adjustedUs / 1000000UL);
+	tv->tv_usec = adjustedUs % 1000000UL;
+}
 
 void __RtcTmToPspTime(ScePspDateTime &t, tm *val)
 {
@@ -74,144 +147,118 @@ void __RtcTmToPspTime(ScePspDateTime &t, tm *val)
 	t.hour = val->tm_hour;
 	t.minute = val->tm_min;
 	t.second = val->tm_sec;
+	t.microsecond = 0;
 }
 
-//based on  http://stackoverflow.com/a/11197532
-//TODO: Doesn't take PSPs daylight saving into account and doesnt check for overflow errors
 void __RtcTicksToPspTime(ScePspDateTime &t, u64 ticks)
 {
-	u64 sec;
-	u16 quadricentennials, centennials, quadrennials, annuals;
-	u16 year, leap;
-	u16 yday, hour, min;
-	u16 month, mday;
-	static const u16 daysSinceJan1st[2][13]=
+	int numYearAdd = 0;
+	if(ticks < 1000000ULL)
 	{
-		{0,31,59,90,120,151,181,212,243,273,304,334,365}, // 365 days, non-leap
-		{0,31,60,91,121,152,182,213,244,274,305,335,366}  // 366 days, leap
-	};
-	sec = ticks / 1000000UL;
-
-	// Remove multiples of 400 years (incl. 97 leap days)
-	quadricentennials = (u16)(sec / 12622780800ULL); // 400*365.2425*24*3600
-	sec %= 12622780800ULL;
-
-	// Remove multiples of 100 years (incl. 24 leap days), can't be more than 3
-	// (because multiples of 4*100=400 years (incl. leap days) have been removed)
-	centennials = (u16)(sec / 3155673600ULL); // 100*(365+24/100)*24*3600
-	if (centennials > 3)
-	{
-		centennials = 3;
+		t.year = 1;
+		t.month = 1;
+		t.day = 1;
+		t.hour = 0;
+		t.minute = 0;
+		t.second = 0;
+		t.microsecond = ticks % 1000000ULL;
+		return;
 	}
-	sec -= centennials * 3155673600ULL;
-
-	// Remove multiples of 4 years (incl. 1 leap day), can't be more than 24
-	// (because multiples of 25*4=100 years (incl. leap days) have been removed)
-	quadrennials = (u16)(sec / 126230400); // 4*(365+1/4)*24*3600
-	if (quadrennials > 24)
+	else if(ticks < rtcMagicOffset )
 	{
-		quadrennials = 24;
-	}
-	sec -= quadrennials * 126230400ULL;
+		// Need to get a year past 1970 for gmtime
+		// Add enough 400 year to pass over 1970.
+		// Each 400 year are equal
+		// 400 year is 20871 weeks
+		u64 ticks400Y = (u64)20871 * 7 * 24 * 3600 * 1000000ULL;
+		numYearAdd = (int) ((rtcMagicOffset - ticks) / ticks400Y + 1);
+		ticks += ticks400Y * numYearAdd;
 
-	// Remove multiples of years (incl. 0 leap days), can't be more than 3
-	// (because multiples of 4 years (incl. leap days) have been removed)
-	annuals = (u16)(sec / 31536000); // 365*24*3600
-	if (annuals > 3)
-	{
-		annuals = 3;
-	}
-	sec -= annuals * 31536000ULL;
-
-	// Calculate the year and find out if it's leap
-	year = 1 + quadricentennials * 400 + centennials * 100 + quadrennials * 4 + annuals;
-	leap = !(year % 4) && (year % 100 || !(year % 400));
-
-	// Calculate the day of the year and the time
-	yday = (u16)(sec / 86400);
-	sec %= 86400;
-	hour = (u16)(sec / 3600);
-	sec %= 3600;
-	min = (u16)(sec / 60);
-	sec %= 60;
-
-	// Calculate the month
-	for (mday = month = 1; month < 13; month++)
-	{
-		if (yday < daysSinceJan1st[leap][month])
-		{
-			mday += yday - daysSinceJan1st[leap][month - 1];
-			break;
-		}
 	}
 
-	t.year = year;
-	t.month = month;
-	t.day = mday;
-	t.hour = hour;
-	t.minute = min;
-	t.second = (u16)sec;
-	t.microsecond = ticks % 1000000;
+	time_t time = (ticks - rtcMagicOffset) / 1000000ULL;
+	t.microsecond = ticks % 1000000ULL;
+
+	tm *local = gmtime(&time);
+	if (!local)
+	{
+		ERROR_LOG(SCERTC, "Date is too high/low to handle, pretending to work.");
+		return;
+	}
+
+	t.year = local->tm_year + 1900 - numYearAdd * 400;
+	t.month = local->tm_mon + 1;
+	t.day = local->tm_mday;
+	t.hour = local->tm_hour;
+	t.minute = local->tm_min;
+	t.second = local->tm_sec;
 }
 
-u64 JumpYMD(u64 year, u64 month, u64 day) {
-	return 367*year - 7*(year+(month+9)/12)/4 + 275*month/9 + day;
-}
-
-u64 JumpSeconds(u64 year, u64 month, u64 day, u64 hour, u64 minute, u64 second) {
-	static const u64 secs_per_day = 24 * 60 * 60;
-	return JumpYMD(year, month, day) * secs_per_day + hour * 3600 + minute * 60 + second;
-}
-
-u64 __RtcPspTimeToTicks(ScePspDateTime &t)
+u64 __RtcPspTimeToTicks(ScePspDateTime &pt)
 {
-	u64 seconds = JumpSeconds(t.year, t.month, t.day, t.hour, t.minute, t.second);
-	u64 ticks = (seconds * 1000000UL) + t.microsecond;
+	tm local;
+	local.tm_year = pt.year - 1900;
+	local.tm_mon = pt.month - 1;
+	local.tm_mday = pt.day;
+	local.tm_wday = -1;
+	local.tm_yday = -1;
+	local.tm_hour = pt.hour;
+	local.tm_min = pt.minute;
+	local.tm_sec = pt.second;
+	local.tm_isdst = 0;
 
-	return ticks;
+	time_t seconds = rtc_timegm(&local);
+	u64 result = rtcMagicOffset + (u64) seconds * 1000000ULL;
+	result += pt.microsecond;
+	return result;
 }
 
 bool __RtcValidatePspTime(ScePspDateTime &t)
 {
-	return t.year > 0;
+	return t.year > 0 && t.year <= 9999;
 }
 
 u32 sceRtcGetTickResolution()
 {
-	DEBUG_LOG(HLE, "sceRtcGetTickResolution()");
+	DEBUG_LOG(SCERTC, "sceRtcGetTickResolution()");
 	return 1000000;
 }
 
 u32 sceRtcGetCurrentTick(u32 tickPtr)
 {
 	//Don't spam the log
-	//DEBUG_LOG(HLE, "sceRtcGetCurrentTick(%08x)", tickPtr);
+	//DEBUG_LOG(SCERTC, "sceRtcGetCurrentTick(%08x)", tickPtr);
 
 	u64 curTick = __RtcGetCurrentTick();
 	if (Memory::IsValidAddress(tickPtr))
 		Memory::Write_U64(curTick, tickPtr);
-
+	hleEatCycles(300);
 	return 0;
 }
 
 u64 sceRtcGetAcculumativeTime() 
 {
-	DEBUG_LOG(HLE, "sceRtcGetAcculumativeTime()");
+	DEBUG_LOG(SCERTC, "sceRtcGetAcculumativeTime()");
 	return __RtcGetCurrentTick();
 }
 
 u32 sceRtcGetCurrentClock(u32 pspTimePtr, int tz)
 {
-	DEBUG_LOG(HLE, "sceRtcGetCurrentClock(%08x, %d)", pspTimePtr, tz);
-	timeval tv;
-	gettimeofday(&tv, NULL);
+	DEBUG_LOG(SCERTC, "sceRtcGetCurrentClock(%08x, %d)", pspTimePtr, tz);
+	PSPTimeval tv;
+	__RtcTimeOfDay(&tv);
 
 	time_t sec = (time_t) tv.tv_sec;
 	tm *utc = gmtime(&sec);
+	if (!utc)
+	{
+		ERROR_LOG(SCERTC, "Date is too high/low to handle, pretending to work.");
+		return 0;
+	}
 
 	utc->tm_isdst = -1;
 	utc->tm_min += tz;
-	mktime(utc);
+	rtc_timegm(utc); // Return gmt time with timezone offset.
 
 	ScePspDateTime ret;
 	__RtcTmToPspTime(ret, utc);
@@ -220,17 +267,23 @@ u32 sceRtcGetCurrentClock(u32 pspTimePtr, int tz)
 	if (Memory::IsValidAddress(pspTimePtr))
 		Memory::WriteStruct(pspTimePtr, &ret);
 
+	hleEatCycles(1900);
 	return 0;
 }
 
 u32 sceRtcGetCurrentClockLocalTime(u32 pspTimePtr)
 {
-	DEBUG_LOG(HLE, "sceRtcGetCurrentClockLocalTime(%08x)", pspTimePtr);
-	timeval tv;
-	gettimeofday(&tv, NULL);
+	DEBUG_LOG(SCERTC, "sceRtcGetCurrentClockLocalTime(%08x)", pspTimePtr);
+	PSPTimeval tv;
+	__RtcTimeOfDay(&tv);
 
 	time_t sec = (time_t) tv.tv_sec;
 	tm *local = localtime(&sec);
+	if (!local)
+	{
+		ERROR_LOG(SCERTC, "Date is too high/low to handle, pretending to work.");
+		return 0;
+	}
 
 	ScePspDateTime ret;
 	__RtcTmToPspTime(ret, local);
@@ -239,12 +292,13 @@ u32 sceRtcGetCurrentClockLocalTime(u32 pspTimePtr)
 	if (Memory::IsValidAddress(pspTimePtr))
 		Memory::WriteStruct(pspTimePtr, &ret);
 
+	hleEatCycles(2000);
 	return 0;
 }
 
 u32 sceRtcSetTick(u32 pspTimePtr, u32 tickPtr)
 {
-	DEBUG_LOG(HLE, "sceRtcSetTick(%08x, %08x)", pspTimePtr, tickPtr);
+	DEBUG_LOG(SCERTC, "sceRtcSetTick(%08x, %08x)", pspTimePtr, tickPtr);
 	if (Memory::IsValidAddress(pspTimePtr) && Memory::IsValidAddress(tickPtr))
 	{
 		u64 ticks = Memory::Read_U64(tickPtr);
@@ -258,7 +312,7 @@ u32 sceRtcSetTick(u32 pspTimePtr, u32 tickPtr)
 
 u32 sceRtcGetTick(u32 pspTimePtr, u32 tickPtr)
 {
-	DEBUG_LOG(HLE, "sceRtcGetTick(%08x, %08x)", pspTimePtr, tickPtr);
+	DEBUG_LOG(SCERTC, "sceRtcGetTick(%08x, %08x)", pspTimePtr, tickPtr);
 	ScePspDateTime pt;
 
 	if (Memory::IsValidAddress(pspTimePtr) && Memory::IsValidAddress(tickPtr))
@@ -268,20 +322,7 @@ u32 sceRtcGetTick(u32 pspTimePtr, u32 tickPtr)
 		if (!__RtcValidatePspTime(pt))
 			return SCE_KERNEL_ERROR_INVALID_VALUE;
 
-		tm local;
-		local.tm_year = pt.year - 1900;
-		local.tm_mon = pt.month - 1;
-		local.tm_mday = pt.day;
-		local.tm_wday = -1;
-		local.tm_yday = -1;
-		local.tm_hour = pt.hour;
-		local.tm_min = pt.minute;
-		local.tm_sec = pt.second;
-		local.tm_isdst = -1;
-
-		time_t seconds = mktime(&local);
-		u64 result = rtcMagicOffset + (u64) seconds * 1000000ULL;
-		result += pt.microsecond;
+		u64 result = __RtcPspTimeToTicks(pt);
 
 		Memory::Write_U64(result, tickPtr);
 	}
@@ -291,20 +332,42 @@ u32 sceRtcGetTick(u32 pspTimePtr, u32 tickPtr)
 
 u32 sceRtcGetDayOfWeek(u32 year, u32 month, u32 day)
 {
-	DEBUG_LOG(HLE, "sceRtcGetDayOfWeek(%d, %d, %d)", year, month, day);
-	static u32 t[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
-	if (month > 12 || month < 1) {
-		// Preventive crashfix
-		ERROR_LOG(HLE,"Bad month"); // this might not be right as a game is checking for sceRtcGetDayOfWeek:166970016, 1024, 0 and expecting 3 returned..
-		return 0;
+	DEBUG_LOG(SCERTC, "sceRtcGetDayOfWeek(%d, %d, %d)", year, month, day);
+
+	if(month == 0)	// Mark month 0 as august, don't know why, but works
+	{
+		month = 8;
 	}
-	year -= month < 3;
-	return (year + year/4 - year/100 + year/400 + t[month-1] + day) % 7;
+
+	if(month > 12) // After month 12, psp months does 31/31/30/31/30 and repeat
+	{
+		int restMonth = month-12;
+		int grp5 = restMonth / 5;
+		restMonth = restMonth % 5;
+		day += grp5 * (31*3+30*2);
+		static u32 t[] = { 31, 31*2, 31*2+30, 31*3+30, 31*3+30*2 };
+		day += t[restMonth-1];
+		month = 12;
+	}
+
+	tm local;
+	local.tm_year = year - 1900;
+	local.tm_mon = month - 1;
+	local.tm_mday = day;
+	local.tm_wday = -1;
+	local.tm_yday = -1;
+	local.tm_hour = 0;
+	local.tm_min = 0;
+	local.tm_sec = 0;
+	local.tm_isdst = -1;
+
+	mktime(&local);
+	return local.tm_wday;
 }
 
 u32 sceRtcGetDaysInMonth(u32 year, u32 month)
 {
-	DEBUG_LOG(HLE, "sceRtcGetDaysInMonth(%d, %d)", year, month);
+	DEBUG_LOG(SCERTC, "sceRtcGetDaysInMonth(%d, %d)", year, month);
 	u32 numberOfDays;
 
 	if (year == 0 || month == 0 || month > 12)
@@ -335,17 +398,24 @@ u32 sceRtcGetDaysInMonth(u32 year, u32 month)
 
 u32 sceRtcIsLeapYear(u32 year)
 {
-	ERROR_LOG(HLE, "sceRtcIsLeapYear(%d)", year);
+	DEBUG_LOG(SCERTC, "sceRtcIsLeapYear(%d)", year);
 	return (year % 4 == 0) && (!(year % 100 == 0) || (year % 400 == 0));
 }
 
 int sceRtcConvertLocalTimeToUTC(u32 tickLocalPtr,u32 tickUTCPtr)	
 {
-	DEBUG_LOG(HLE, "sceRtcConvertLocalTimeToUTC(%d, %d)", tickLocalPtr, tickUTCPtr);
+	DEBUG_LOG(SCERTC, "sceRtcConvertLocalTimeToUTC(%d, %d)", tickLocalPtr, tickUTCPtr);
 	if (Memory::IsValidAddress(tickLocalPtr) && Memory::IsValidAddress(tickUTCPtr))
 	{
 		u64 srcTick = Memory::Read_U64(tickLocalPtr);
-		// TODO:convert UTC as ticks to localtime as ticks.. fake it by preteding timezone is UTC for now
+		// TODO : Let the user select his timezone / daylight saving instead of taking system param ?
+#if defined(__GLIBC__) || defined(BLACKBERRY) || defined(__SYMBIAN32__)
+		time_t timezone = 0;
+		tm *time = localtime(&timezone);
+		srcTick -= time->tm_gmtoff*1000000ULL;
+#else
+		srcTick -= -timezone * 1000000ULL;
+#endif
 		Memory::Write_U64(srcTick, tickUTCPtr);
 	}
 	else
@@ -357,11 +427,18 @@ int sceRtcConvertLocalTimeToUTC(u32 tickLocalPtr,u32 tickUTCPtr)
 
 int sceRtcConvertUtcToLocalTime(u32 tickUTCPtr,u32 tickLocalPtr) 
 {
-	ERROR_LOG(HLE, "sceRtcConvertLocalTimeToUTC(%d, %d)", tickLocalPtr, tickUTCPtr);
+	DEBUG_LOG(SCERTC, "sceRtcConvertLocalTimeToUTC(%d, %d)", tickLocalPtr, tickUTCPtr);
 	if (Memory::IsValidAddress(tickLocalPtr) && Memory::IsValidAddress(tickUTCPtr))
 	{
 		u64 srcTick = Memory::Read_U64(tickUTCPtr);
-		// TODO:convert localtime as ticks to UTC as ticks.. fake it by preteding timezone is UTC for now
+		// TODO : Let the user select his timezone / daylight saving instead of taking system param ?
+#if defined(__GLIBC__) || defined(BLACKBERRY) || defined(__SYMBIAN32__)
+		time_t timezone = 0;
+		tm *time = localtime(&timezone);
+		srcTick += time->tm_gmtoff*1000000ULL;
+#else
+		srcTick += -timezone * 1000000ULL;
+#endif
 		Memory::Write_U64(srcTick, tickLocalPtr);
 	}
 	else
@@ -373,7 +450,7 @@ int sceRtcConvertUtcToLocalTime(u32 tickUTCPtr,u32 tickLocalPtr)
 
 int sceRtcCheckValid(u32 datePtr)
 {
-	DEBUG_LOG(HLE, "sceRtcCheckValid(%d)", datePtr);
+	DEBUG_LOG(SCERTC, "sceRtcCheckValid(%d)", datePtr);
 
 	if (Memory::IsValidAddress(datePtr))
 	{
@@ -407,7 +484,7 @@ int sceRtcCheckValid(u32 datePtr)
 		{
 			return PSP_TIME_INVALID_SECONDS;
 		}
-		else if (pt.microsecond >= 1000000)
+		else if (pt.microsecond >= 1000000UL)
 		{
 			return PSP_TIME_INVALID_MICROSECONDS;
 		}
@@ -423,12 +500,11 @@ int sceRtcCheckValid(u32 datePtr)
 
 int sceRtcSetTime_t(u32 datePtr, u32 time)
 {
-	ERROR_LOG(HLE, "HACK sceRtcSetTime_t(%08x,%d)", datePtr, time);
+	DEBUG_LOG(SCERTC, "sceRtcSetTime_t(%08x,%d)", datePtr, time);
 	if (Memory::IsValidAddress(datePtr))
 	{
 		ScePspDateTime pt;
-		__RtcTicksToPspTime(pt, time*1000000ULL);
-		pt.year += 1969;
+		__RtcTicksToPspTime(pt, time*1000000ULL + rtcMagicOffset);
 		Memory::WriteStruct(datePtr, &pt);
 	}
 	else
@@ -440,12 +516,11 @@ int sceRtcSetTime_t(u32 datePtr, u32 time)
 
 int sceRtcSetTime64_t(u32 datePtr, u64 time)
 {
-	ERROR_LOG(HLE, "HACK sceRtcSetTime64_t(%08x,%lld)", datePtr, time);
+	DEBUG_LOG(SCERTC, "sceRtcSetTime64_t(%08x,%lld)", datePtr, time);
 	if (Memory::IsValidAddress(datePtr))
 	{
 		ScePspDateTime pt;
-		__RtcTicksToPspTime(pt, time*1000000ULL);
-		pt.year += 1969;
+		__RtcTicksToPspTime(pt, time*1000000ULL + rtcMagicOffset);
 		Memory::WriteStruct(datePtr, &pt);
 	}
 	else
@@ -457,13 +532,12 @@ int sceRtcSetTime64_t(u32 datePtr, u64 time)
 
 int sceRtcGetTime_t(u32 datePtr, u32 timePtr)
 {
-	ERROR_LOG(HLE, "HACK sceRtcGetTime_t(%08x,%08x)", datePtr, timePtr);
+	DEBUG_LOG(SCERTC, "sceRtcGetTime_t(%08x,%08x)", datePtr, timePtr);
 	if (Memory::IsValidAddress(datePtr)&&Memory::IsValidAddress(timePtr))
 	{
 		ScePspDateTime pt;
 		Memory::ReadStruct(datePtr, &pt);
-		pt.year-=1969;
-		u32 result = (u32) (__RtcPspTimeToTicks(pt)/1000000ULL);
+		u32 result = (u32) ((__RtcPspTimeToTicks(pt)-rtcMagicOffset)/1000000ULL);
 		Memory::Write_U32(result, timePtr);
 	}
 	else
@@ -475,13 +549,12 @@ int sceRtcGetTime_t(u32 datePtr, u32 timePtr)
 
 int sceRtcGetTime64_t(u32 datePtr, u32 timePtr)
 {
-	ERROR_LOG(HLE, "HACK sceRtcGetTime64_t(%08x,%08x)", datePtr, timePtr);
+	DEBUG_LOG(SCERTC, "sceRtcGetTime64_t(%08x,%08x)", datePtr, timePtr);
 	if (Memory::IsValidAddress(datePtr)&&Memory::IsValidAddress(timePtr))
 	{
 		ScePspDateTime pt;
 		Memory::ReadStruct(datePtr, &pt);
-		pt.year-=1969;
-		u64 result = __RtcPspTimeToTicks(pt)/1000000ULL;
+		u64 result = (__RtcPspTimeToTicks(pt)-rtcMagicOffset)/1000000ULL;
 		Memory::Write_U64(result, timePtr);
 	}
 	else
@@ -493,12 +566,22 @@ int sceRtcGetTime64_t(u32 datePtr, u32 timePtr)
 
 int sceRtcSetDosTime(u32 datePtr, u32 dosTime)
 {
-	ERROR_LOG(HLE, "HACK sceRtcSetDosTime(%d,%d)", datePtr, dosTime);
+	DEBUG_LOG(SCERTC, "sceRtcSetDosTime(%d,%d)", datePtr, dosTime);
 	if (Memory::IsValidAddress(datePtr))
 	{
 		ScePspDateTime pt;
 
-		__RtcTicksToPspTime(pt, dosTime);
+		int hms = dosTime & 0xFFFF;
+		int ymd = dosTime >> 16;
+
+		pt.year = 1980 + (ymd >> 9);
+		pt.month = (ymd >> 5) & 0xF;
+		pt.day = ymd & 0x1F;
+		pt.hour = hms >> 11;
+		pt.minute = (hms >> 5) & 0x3F;
+		pt.second = (hms << 1) & 0x3E;
+		pt.microsecond = 0;
+
 		Memory::WriteStruct(datePtr, &pt);
 	}
 	else
@@ -510,37 +593,91 @@ int sceRtcSetDosTime(u32 datePtr, u32 dosTime)
 
 int sceRtcGetDosTime(u32 datePtr, u32 dosTime)
 {
-	ERROR_LOG(HLE, "HACK sceRtcGetDosTime(%d,%d)", datePtr, dosTime);
+	int retValue = 0;
+	DEBUG_LOG(SCERTC, "sceRtcGetDosTime(%d,%d)", datePtr, dosTime);
 	if (Memory::IsValidAddress(datePtr)&&Memory::IsValidAddress(dosTime))
 	{
 		ScePspDateTime pt;
 		Memory::ReadStruct(datePtr, &pt);
-		u64 result = __RtcPspTimeToTicks(pt);
-		Memory::Write_U64(result, dosTime);
+
+		u32 result = 0;
+		if(pt.year < 1980)
+		{
+			result = 0;
+			retValue = -1;
+		}
+		else if(pt.year >= 2108)
+		{
+			result = 0xFF9FBF7D;
+			retValue = -1;
+		}
+		else
+		{
+			int year = ((pt.year - 1980) & 0x7F) << 9;
+			int month = ((pt.month) & 0xF ) << 5;
+			int hour = ((pt.hour) & 0x1F ) << 11;
+			int minute = ((pt.minute) & 0x3F ) << 5;
+			int day = (pt.day) & 0x1F;
+			int second = ((pt.second) >> 1) & 0x1F;
+			int ymd = year | month | day;
+			int hms = hour | minute | second;
+			result = (ymd << 16) | hms;
+			retValue = 0;
+		}
+
+		Memory::Write_U32(result, dosTime);
 	}
 	else
 	{
-		return 1;
+		retValue = -1;
 	}
-	return 0;
-
+	return retValue;
 }
 
-int sceRtcSetWin32FileTime(u32 datePtr, u32 win32TimePtr)
+int sceRtcSetWin32FileTime(u32 datePtr, u64 win32Time)
 {
-	ERROR_LOG(HLE, "UNIMPL sceRtcSetWin32FileTime(%d,%d)", datePtr, win32TimePtr);
+	if (!Memory::IsValidAddress(datePtr))
+	{
+		ERROR_LOG_REPORT(SCERTC, "sceRtcSetWin32FileTime(%08x, %lld): invalid address", datePtr, win32Time);
+		return -1;
+	}
+
+	DEBUG_LOG(SCERTC, "sceRtcSetWin32FileTime(%08x, %lld)", datePtr, win32Time);
+
+	u64 ticks = (win32Time / 10) + rtcFiletimeOffset;
+	auto pspTime = Memory::GetStruct<ScePspDateTime>(datePtr);
+	__RtcTicksToPspTime(*pspTime, ticks);
 	return 0;
 }
 
 int sceRtcGetWin32FileTime(u32 datePtr, u32 win32TimePtr)
 {
-	ERROR_LOG(HLE, "UNIMPL sceRtcGetWin32FileTime(%d,%d)", datePtr, win32TimePtr);
+	if (!Memory::IsValidAddress(datePtr))
+	{
+		ERROR_LOG_REPORT(SCERTC, "sceRtcGetWin32FileTime(%08x, %08x): invalid address", datePtr, win32TimePtr);
+		return -1;
+	}
+
+	DEBUG_LOG(SCERTC, "sceRtcGetWin32FileTime(%08x, %08x)", datePtr, win32TimePtr);
+	if (!Memory::IsValidAddress(win32TimePtr))
+		return SCE_KERNEL_ERROR_INVALID_VALUE;
+
+	auto pspTime = Memory::GetStruct<ScePspDateTime>(datePtr);
+	u64 result = __RtcPspTimeToTicks(*pspTime);
+
+	if (!__RtcValidatePspTime(*pspTime) || result < rtcFiletimeOffset)
+	{
+		Memory::Write_U64(0, win32TimePtr);
+		return SCE_KERNEL_ERROR_INVALID_VALUE;
+	}
+
+	Memory::Write_U64((result - rtcFiletimeOffset) * 10, win32TimePtr);
 	return 0;
 }
 
 int sceRtcCompareTick(u32 tick1Ptr, u32 tick2Ptr)
 {
-	ERROR_LOG(HLE, "HACK sceRtcCompareTick(%d,%d)", tick1Ptr, tick2Ptr);
+	DEBUG_LOG(SCERTC, "sceRtcCompareTick(%d,%d)", tick1Ptr, tick2Ptr);
 	if (Memory::IsValidAddress(tick1Ptr) && Memory::IsValidAddress(tick2Ptr))
 	{
 		u64 tick1 = Memory::Read_U64(tick1Ptr);
@@ -563,7 +700,7 @@ int sceRtcTickAddTicks(u32 destTickPtr, u32 srcTickPtr, u64 numTicks)
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
 
-	DEBUG_LOG(HLE, "sceRtcTickAddTicks(%x,%x,%llu)", destTickPtr, srcTickPtr, numTicks);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddTicks(%x,%x,%llu)", destTickPtr, srcTickPtr, numTicks);
 	return 0;
 }
 
@@ -577,7 +714,7 @@ int sceRtcTickAddMicroseconds(u32 destTickPtr,u32 srcTickPtr, u64 numMS)
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
 
-	ERROR_LOG(HLE, "HACK sceRtcTickAddMicroseconds(%x,%x,%llu)", destTickPtr, srcTickPtr, numMS);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddMicroseconds(%x,%x,%llu)", destTickPtr, srcTickPtr, numMS);
 	return 0;
 }
 
@@ -590,7 +727,7 @@ int sceRtcTickAddSeconds(u32 destTickPtr, u32 srcTickPtr, u64 numSecs)
 		srcTick += numSecs * 1000000UL;
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
-	ERROR_LOG(HLE, "HACK sceRtcTickAddSeconds(%x,%x,%llu)", destTickPtr, srcTickPtr, numSecs);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddSeconds(%x,%x,%llu)", destTickPtr, srcTickPtr, numSecs);
 	return 0;
 }
 
@@ -603,7 +740,7 @@ int sceRtcTickAddMinutes(u32 destTickPtr, u32 srcTickPtr, u64 numMins)
 		srcTick += numMins*60000000UL;
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
-	ERROR_LOG(HLE, "HACK sceRtcTickAddMinutes(%x,%x,%llu)", destTickPtr, srcTickPtr, numMins);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddMinutes(%x,%x,%llu)", destTickPtr, srcTickPtr, numMins);
 	return 0;
 }
 
@@ -615,7 +752,7 @@ int sceRtcTickAddHours(u32 destTickPtr, u32 srcTickPtr, int numHours)
 		srcTick += numHours*3600000000UL;
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
-	ERROR_LOG(HLE, "HACK sceRtcTickAddMinutes(%d,%d,%d)", destTickPtr, srcTickPtr, numHours);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddMinutes(%d,%d,%d)", destTickPtr, srcTickPtr, numHours);
 	return 0;
 }
 
@@ -628,7 +765,7 @@ int sceRtcTickAddDays(u32 destTickPtr, u32 srcTickPtr, int numDays)
 		srcTick += numDays*86400000000UL;
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
-	ERROR_LOG(HLE, "HACK sceRtcTickAddDays(%d,%d,%d)", destTickPtr, srcTickPtr, numDays);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddDays(%d,%d,%d)", destTickPtr, srcTickPtr, numDays);
 	return 0;
 }
 
@@ -641,7 +778,7 @@ int sceRtcTickAddWeeks(u32 destTickPtr, u32 srcTickPtr, int numWeeks)
 		srcTick += numWeeks*604800000000UL;
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
-	ERROR_LOG(HLE, "HACK sceRtcTickAddWeeks(%d,%d,%d)", destTickPtr, srcTickPtr, numWeeks);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddWeeks(%d,%d,%d)", destTickPtr, srcTickPtr, numWeeks);
 	return 0;
 }
 
@@ -651,45 +788,50 @@ int sceRtcTickAddMonths(u32 destTickPtr, u32 srcTickPtr, int numMonths)
 	{
 		u64 srcTick = Memory::Read_U64(srcTickPtr);
 
-		// slightly bodgy but we need to add months to a pt and then convert to ticks to cover different day count in months and leapyears
 		ScePspDateTime pt;
 		memset(&pt, 0, sizeof(pt));
-		if (numMonths < 0)
+
+		__RtcTicksToPspTime(pt,srcTick);
+		if(((pt.year-1)*12+pt.month) + numMonths < 1 || ((pt.year-1)*12+pt.month) + numMonths > 9999*12)
 		{
-			numMonths = -numMonths;;
-			int years = numMonths /12;
-			int realmonths = numMonths % 12;
-
-			pt.year = years;
-			pt.month = realmonths;
-			u64 monthTicks =__RtcPspTimeToTicks(pt);
-
-			if (monthTicks <= srcTick)
-			{
-				srcTick-=monthTicks;
-			}
-			else
-			{
-				srcTick=0;
-			}
-
+			srcTick = 0;
 		}
 		else
 		{
-			int years = numMonths /12;
-			int realmonths = numMonths % 12;
-			pt.year = years;
-			pt.month = realmonths;
-			srcTick +=__RtcPspTimeToTicks(pt);
+			if(numMonths < 0)
+			{
+				pt.year += numMonths/12;
+				int restMonth = pt.month + numMonths%12;
+				if(restMonth < 1)
+				{
+					pt.month = 12+restMonth;
+					pt.year--;
+				}
+				else
+				{
+					pt.month = restMonth;
+				}
+			}
+			else
+			{
+				pt.year += numMonths/12;
+				pt.month += numMonths%12;
+				if(pt.month > 12)
+				{
+					pt.month -= 12;
+					pt.year++;
+				}
+			}
+			u64 yearTicks = __RtcPspTimeToTicks(pt);
+			srcTick =yearTicks;
 		}
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
 
-	ERROR_LOG(HLE, "HACK sceRtcTickAddMonths(%d,%d,%d)", destTickPtr, srcTickPtr, numMonths);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddMonths(%d,%d,%d)", destTickPtr, srcTickPtr, numMonths);
 	return 0;
 }
 
-// TODO: off by 6 days every 2000 years.
 int sceRtcTickAddYears(u32 destTickPtr, u32 srcTickPtr, int numYears)
 {
 	if (Memory::IsValidAddress(destTickPtr) && Memory::IsValidAddress(srcTickPtr))
@@ -699,79 +841,95 @@ int sceRtcTickAddYears(u32 destTickPtr, u32 srcTickPtr, int numYears)
 		ScePspDateTime pt;
 		memset(&pt, 0, sizeof(pt));
 
-		if (numYears < 0)
+		__RtcTicksToPspTime(pt,srcTick);
+		if(pt.year + numYears <= 0 || pt.year + numYears > 9999)
 		{
-			pt.year = -numYears;
-			u64 yearTicks = __RtcPspTimeToTicks(pt);
-			if (yearTicks <= srcTick)
-			{
-				srcTick-=yearTicks;
-			}
-			else
-			{
-				srcTick=0;
-			}
+			srcTick = 0;
 		}
 		else
 		{
-			pt.year = numYears;
+			pt.year += numYears;
 			u64 yearTicks = __RtcPspTimeToTicks(pt);
-			srcTick +=yearTicks;
+			srcTick =yearTicks;
 		}
 
 		Memory::Write_U64(srcTick, destTickPtr);
 	}
 
-	DEBUG_LOG(HLE, "HACK sceRtcTickAddYears(%d,%d,%d)", destTickPtr, srcTickPtr, numYears);
+	DEBUG_LOG(SCERTC, "sceRtcTickAddYears(%d,%d,%d)", destTickPtr, srcTickPtr, numYears);
 	return 0;
 }
 
 int sceRtcParseDateTime(u32 destTickPtr, u32 dateStringPtr)
 {
-	ERROR_LOG(HLE, "UNIMPL sceRtcParseDateTime(%d,%d)", destTickPtr, dateStringPtr);
+	ERROR_LOG_REPORT(SCERTC, "UNIMPL sceRtcParseDateTime(%d,%d)", destTickPtr, dateStringPtr);
 	return 0;
+}
+
+int sceRtcGetLastAdjustedTime(u32 tickPtr)
+{
+	u64 curTick = __RtcGetCurrentTick();
+	if (Memory::IsValidAddress(tickPtr))
+		Memory::Write_U64(curTick, tickPtr);
+	DEBUG_LOG(SCERTC, "sceRtcGetLastAdjustedTime(%d)", tickPtr);
+	return 0;
+}
+
+//Returns 0 on success, according to Project Diva 2nd jpcsptrace log
+int sceRtcSetAlarmTick(u32 unknown1, u32 unknown2)
+{
+	ERROR_LOG(SCERTC, "UNIMPL sceRtcSetAlarmTick(%x, %x)", unknown1, unknown2);
+	return 0; 
 }
 
 const HLEFunction sceRtc[] =
 {
-	{0xC41C2853, WrapU_V<sceRtcGetTickResolution>, "sceRtcGetTickResolution"},
-	{0x3f7ad767, WrapU_U<sceRtcGetCurrentTick>, "sceRtcGetCurrentTick"},
-	{0x011F03C1, WrapU64_V<sceRtcGetAcculumativeTime>, "sceRtcGetAccumulativeTime"},
-	{0x029CA3B3, WrapU64_V<sceRtcGetAcculumativeTime>, "sceRtcGetAccumlativeTime"},
-	{0x4cfa57b0, WrapU_UI<sceRtcGetCurrentClock>, "sceRtcGetCurrentClock"},
-	{0xE7C27D1B, WrapU_U<sceRtcGetCurrentClockLocalTime>, "sceRtcGetCurrentClockLocalTime"},
-	{0x34885E0D, WrapI_UU<sceRtcConvertUtcToLocalTime>, "sceRtcConvertUtcToLocalTime"},
-	{0x779242A2, WrapI_UU<sceRtcConvertLocalTimeToUTC>, "sceRtcConvertLocalTimeToUTC"},
-	{0x42307A17, WrapU_U<sceRtcIsLeapYear>, "sceRtcIsLeapYear"},
-	{0x05ef322c, WrapU_UU<sceRtcGetDaysInMonth>, "sceRtcGetDaysInMonth"},
-	{0x57726bc1, WrapU_UUU<sceRtcGetDayOfWeek>, "sceRtcGetDayOfWeek"},
-	{0x4B1B5E82, WrapI_U<sceRtcCheckValid>, "sceRtcCheckValid"},
-	{0x3a807cc8, WrapI_UU<sceRtcSetTime_t>, "sceRtcSetTime_t"},
-	{0x27c4594c, WrapI_UU<sceRtcGetTime_t>, "sceRtcGetTime_t"},
-	{0xF006F264, WrapI_UU<sceRtcSetDosTime>, "sceRtcSetDosTime"},
-	{0x36075567, WrapI_UU<sceRtcGetDosTime>, "sceRtcGetDosTime"},
-	{0x7ACE4C04, WrapI_UU<sceRtcSetWin32FileTime>, "sceRtcSetWin32FileTime"},
-	{0xCF561893, WrapI_UU<sceRtcGetWin32FileTime>, "sceRtcGetWin32FileTime"},
-	{0x7ED29E40, WrapU_UU<sceRtcSetTick>, "sceRtcSetTick"},
-	{0x6FF40ACC, WrapU_UU<sceRtcGetTick>, "sceRtcGetTick"},
-	{0x9ED0AE87, WrapI_UU<sceRtcCompareTick>, "sceRtcCompareTick"},
-	{0x44F45E05, WrapI_UUU64<sceRtcTickAddTicks>, "sceRtcTickAddTicks"},
-	{0x26D25A5D, WrapI_UUU64<sceRtcTickAddMicroseconds>, "sceRtcTickAddMicroseconds"},
-	{0xF2A4AFE5, WrapI_UUU64<sceRtcTickAddSeconds>, "sceRtcTickAddSeconds"},
-	{0xE6605BCA, WrapI_UUU64<sceRtcTickAddMinutes>, "sceRtcTickAddMinutes"},
-	{0x26D7A24A, WrapI_UUI<sceRtcTickAddHours>, "sceRtcTickAddHours"},
-	{0xE51B4B7A, WrapI_UUI<sceRtcTickAddDays>, "sceRtcTickAddDays"},
-	{0xCF3A2CA8, WrapI_UUI<sceRtcTickAddWeeks>, "sceRtcTickAddWeeks"},
-	{0xDBF74F1B, WrapI_UUI<sceRtcTickAddMonths>, "sceRtcTickAddMonths"},
-	{0x42842C77, WrapI_UUI<sceRtcTickAddYears>, "sceRtcTickAddYears"},
+	{0xC41C2853, &WrapU_V<sceRtcGetTickResolution>, "sceRtcGetTickResolution"},
+	{0x3f7ad767, &WrapU_U<sceRtcGetCurrentTick>, "sceRtcGetCurrentTick"},
+	{0x011F03C1, &WrapU64_V<sceRtcGetAcculumativeTime>, "sceRtcGetAccumulativeTime"},
+	{0x029CA3B3, &WrapU64_V<sceRtcGetAcculumativeTime>, "sceRtcGetAccumlativeTime"},
+	{0x4cfa57b0, &WrapU_UI<sceRtcGetCurrentClock>, "sceRtcGetCurrentClock"},
+	{0xE7C27D1B, &WrapU_U<sceRtcGetCurrentClockLocalTime>, "sceRtcGetCurrentClockLocalTime"},
+	{0x34885E0D, &WrapI_UU<sceRtcConvertUtcToLocalTime>, "sceRtcConvertUtcToLocalTime"},
+	{0x779242A2, &WrapI_UU<sceRtcConvertLocalTimeToUTC>, "sceRtcConvertLocalTimeToUTC"},
+	{0x42307A17, &WrapU_U<sceRtcIsLeapYear>, "sceRtcIsLeapYear"},
+	{0x05ef322c, &WrapU_UU<sceRtcGetDaysInMonth>, "sceRtcGetDaysInMonth"},
+	{0x57726bc1, &WrapU_UUU<sceRtcGetDayOfWeek>, "sceRtcGetDayOfWeek"},
+	{0x4B1B5E82, &WrapI_U<sceRtcCheckValid>, "sceRtcCheckValid"},
+	{0x3a807cc8, &WrapI_UU<sceRtcSetTime_t>, "sceRtcSetTime_t"},
+	{0x27c4594c, &WrapI_UU<sceRtcGetTime_t>, "sceRtcGetTime_t"},
+	{0xF006F264, &WrapI_UU<sceRtcSetDosTime>, "sceRtcSetDosTime"},
+	{0x36075567, &WrapI_UU<sceRtcGetDosTime>, "sceRtcGetDosTime"},
+	{0x7ACE4C04, &WrapI_UU64<sceRtcSetWin32FileTime>, "sceRtcSetWin32FileTime"},
+	{0xCF561893, &WrapI_UU<sceRtcGetWin32FileTime>, "sceRtcGetWin32FileTime"},
+	{0x7ED29E40, &WrapU_UU<sceRtcSetTick>, "sceRtcSetTick"},
+	{0x6FF40ACC, &WrapU_UU<sceRtcGetTick>, "sceRtcGetTick"},
+	{0x9ED0AE87, &WrapI_UU<sceRtcCompareTick>, "sceRtcCompareTick"},
+	{0x44F45E05, &WrapI_UUU64<sceRtcTickAddTicks>, "sceRtcTickAddTicks"},
+	{0x26D25A5D, &WrapI_UUU64<sceRtcTickAddMicroseconds>, "sceRtcTickAddMicroseconds"},
+	{0xF2A4AFE5, &WrapI_UUU64<sceRtcTickAddSeconds>, "sceRtcTickAddSeconds"},
+	{0xE6605BCA, &WrapI_UUU64<sceRtcTickAddMinutes>, "sceRtcTickAddMinutes"},
+	{0x26D7A24A, &WrapI_UUI<sceRtcTickAddHours>, "sceRtcTickAddHours"},
+	{0xE51B4B7A, &WrapI_UUI<sceRtcTickAddDays>, "sceRtcTickAddDays"},
+	{0xCF3A2CA8, &WrapI_UUI<sceRtcTickAddWeeks>, "sceRtcTickAddWeeks"},
+	{0xDBF74F1B, &WrapI_UUI<sceRtcTickAddMonths>, "sceRtcTickAddMonths"},
+	{0x42842C77, &WrapI_UUI<sceRtcTickAddYears>, "sceRtcTickAddYears"},
 	{0xC663B3B9, 0, "sceRtcFormatRFC2822"},
 	{0x7DE6711B, 0, "sceRtcFormatRFC2822LocalTime"},
 	{0x0498FB3C, 0, "sceRtcFormatRFC3339"},
 	{0x27F98543, 0, "sceRtcFormatRFC3339LocalTime"},
-	{0xDFBC5F16, WrapI_UU<sceRtcParseDateTime>, "sceRtcParseDateTime"},
+	{0xDFBC5F16, &WrapI_UU<sceRtcParseDateTime>, "sceRtcParseDateTime"},
 	{0x28E1E988, 0, "sceRtcParseRFC3339"},
-	{0xe1c93e47, WrapI_UU<sceRtcGetTime64_t>, "sceRtcGetTime64_t"},
-	{0x1909c99b, WrapI_UU64<sceRtcSetTime64_t>, "sceRtcSetTime64_t"},
+	{0xe1c93e47, &WrapI_UU<sceRtcGetTime64_t>, "sceRtcGetTime64_t"},
+	{0x1909c99b, &WrapI_UU64<sceRtcSetTime64_t>, "sceRtcSetTime64_t"},
+	{0x62685E98, &WrapI_U<sceRtcGetLastAdjustedTime>, "sceRtcGetLastAdjustedTime"},
+	{0x203ceb0d, 0, "sceRtcGetLastReincarnatedTime"},
+	{0x7d1fbed3, &WrapI_UU<sceRtcSetAlarmTick>, "sceRtcSetAlarmTick"},
+	{0xf5fcc995, 0, "sceRtc_F5FCC995"},
+	{0x81fcda34, 0, "sceRtcIsAlarmed"},
+	{0xfb3b18cd, 0, "sceRtcRegisterCallback"},
+	{0x6a676d2d, 0, "sceRtcUnregisterCallback"},
+	{0xc2ddbeb5, 0, "sceRtcGetAlarmTick"},
 };
 
 void Register_sceRtc()

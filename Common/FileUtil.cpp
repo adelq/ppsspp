@@ -15,13 +15,11 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
-#include "Common.h"
-#include "CommonPaths.h"
 #include "FileUtil.h"
-#include "StringUtil.h"
+#include "StringUtils.h"
 
 #ifdef _WIN32
-#include <windows.h>
+#include "CommonWindows.h"
 #include <shlobj.h>		// for SHGetFolderPath
 #include <shellapi.h>
 #include <commdlg.h>	// for GetSaveFileName
@@ -41,7 +39,8 @@
 #include <CoreFoundation/CFBundle.h>
 #endif
 
-#include <fstream>
+#include "util/text/utf8.h"
+
 #include <sys/stat.h>
 
 #ifndef S_ISDIR
@@ -51,6 +50,13 @@
 #if !defined(__linux__) && !defined(_WIN32) && !defined(__QNX__)
 #define stat64 stat
 #define fstat64 fstat
+#endif
+
+#define DIR_SEP "/"
+#ifdef _WIN32
+#define DIR_SEP_CHRS "/\\"
+#else
+#define DIR_SEP_CHRS "/"
 #endif
 
 // Hack
@@ -70,21 +76,21 @@ static inline int readdir_r(DIR *dirp, struct dirent *entry, struct dirent **res
 }
 #endif
 
-// No thread safe
-#ifdef _WIN32
-inline struct tm* localtime_r (const time_t *clock, struct tm *result) {
-	if (!clock || !result) return NULL;
-	memcpy(result,localtime(clock),sizeof(*result));
-	return result;
-}
-#endif
-
 
 // This namespace has various generic functions related to files and paths.
 // The code still needs a ton of cleanup.
 // REMEMBER: strdup considered harmful!
 namespace File
 {
+
+FILE *OpenCFile(const std::string &filename, const char *mode)
+{
+#if defined(_WIN32) && defined(UNICODE)
+	return _wfopen(ConvertUTF8ToWString(filename).c_str(), ConvertUTF8ToWString(mode).c_str());
+#else
+	return fopen(filename.c_str(), mode);
+#endif
+}
 
 // Remove any ending forward slashes from directory paths
 // Modifies argument.
@@ -93,42 +99,80 @@ static void StripTailDirSlashes(std::string &fname)
 	if (fname.length() > 1)
 	{
 		size_t i = fname.length() - 1;
+#ifdef _WIN32
+		if (i == 2 && fname[1] == ':' && fname[2] == '\\')
+			return;
+#endif
 		while (strchr(DIR_SEP_CHRS, fname[i]))
 			fname[i--] = '\0';
 	}
 	return;
 }
 
+// _WIN32 only since std::strings are used everywhere else.
+#if defined(_WIN32) && defined(UNICODE)
+static void StripTailDirSlashes(std::wstring &fname)
+{
+	if (fname.length() > 1)
+	{
+		size_t i = fname.length() - 1;
+
+		if (i == 2 && fname[1] == ':' && fname[2] == '\\')
+			return;
+
+		while (wcschr((const wchar_t*)_T(DIR_SEP_CHRS), fname[i]))
+			fname[i--] = '\0';
+	}
+	return;
+}
+#endif
+
 // Returns true if file filename exists
 bool Exists(const std::string &filename)
 {
 	struct stat64 file_info;
+#if defined(_WIN32) && defined(UNICODE)
+	std::wstring copy = ConvertUTF8ToWString(filename);
+	StripTailDirSlashes(copy);
 
+	int result = _wstat64(copy.c_str(), &file_info);
+#else
 	std::string copy(filename);
 	StripTailDirSlashes(copy);
 
 	int result = stat64(copy.c_str(), &file_info);
-
+#endif
 	return (result == 0);
+}
+
+// Returns true if stat represents a directory
+bool IsDirectory(const struct stat64 &file_info)
+{
+	return S_ISDIR(file_info.st_mode);
 }
 
 // Returns true if filename is a directory
 bool IsDirectory(const std::string &filename)
 {
 	struct stat64 file_info;
+#if defined(_WIN32) && defined(UNICODE)
+	std::wstring copy = ConvertUTF8ToWString(filename);
+	StripTailDirSlashes(copy);
 
+	int result = _wstat64(copy.c_str(), &file_info);
+#else
 	std::string copy(filename);
 	StripTailDirSlashes(copy);
 
 	int result = stat64(copy.c_str(), &file_info);
-
+#endif
 	if (result < 0) {
 		WARN_LOG(COMMON, "IsDirectory: stat failed on %s: %s", 
 				 filename.c_str(), GetLastErrorMsg());
 		return false;
 	}
 
-	return S_ISDIR(file_info.st_mode);
+	return IsDirectory(file_info);
 }
 
 // Deletes a given filename, return true on success
@@ -153,7 +197,7 @@ bool Delete(const std::string &filename)
 	}
 
 #ifdef _WIN32
-	if (!DeleteFile(filename.c_str()))
+	if (!DeleteFile(ConvertUTF8ToWString(filename).c_str()))
 	{
 		WARN_LOG(COMMON, "Delete: DeleteFile failed on %s: %s", 
 				 filename.c_str(), GetLastErrorMsg());
@@ -175,7 +219,7 @@ bool CreateDir(const std::string &path)
 {
 	INFO_LOG(COMMON, "CreateDir: directory %s", path.c_str());
 #ifdef _WIN32
-	if (::CreateDirectory(path.c_str(), NULL))
+	if (::CreateDirectory(ConvertUTF8ToWString(path).c_str(), NULL))
 		return true;
 	DWORD error = GetLastError();
 	if (error == ERROR_ALREADY_EXISTS)
@@ -186,7 +230,11 @@ bool CreateDir(const std::string &path)
 	ERROR_LOG(COMMON, "CreateDir: CreateDirectory failed on %s: %i", path.c_str(), error);
 	return false;
 #else
+#ifdef BLACKBERRY
+	if (mkdir(path.c_str(), 0775) == 0)
+#else
 	if (mkdir(path.c_str(), 0755) == 0)
+#endif
 		return true;
 
 	int err = errno;
@@ -262,7 +310,7 @@ bool DeleteDir(const std::string &filename)
 	}
 
 #ifdef _WIN32
-	if (::RemoveDirectory(filename.c_str()))
+	if (::RemoveDirectory(ConvertUTF8ToWString(filename).c_str()))
 		return true;
 #else
 	if (rmdir(filename.c_str()) == 0)
@@ -291,7 +339,7 @@ bool Copy(const std::string &srcFilename, const std::string &destFilename)
 	INFO_LOG(COMMON, "Copy: %s --> %s", 
 			srcFilename.c_str(), destFilename.c_str());
 #ifdef _WIN32
-	if (CopyFile(srcFilename.c_str(), destFilename.c_str(), FALSE))
+	if (CopyFile(ConvertUTF8ToWString(srcFilename).c_str(), ConvertUTF8ToWString(destFilename).c_str(), FALSE))
 		return true;
 
 	ERROR_LOG(COMMON, "Copy: failed %s --> %s: %s", 
@@ -391,28 +439,26 @@ tm GetModifTime(const std::string &filename)
 // Returns the size of filename (64bit)
 u64 GetSize(const std::string &filename)
 {
-	if (!Exists(filename))
+	struct stat64 file_info;
+#if defined(_WIN32) && defined(UNICODE)
+	int result = _wstat64(ConvertUTF8ToWString(filename).c_str(), &file_info);
+#else
+	int result = stat64(filename.c_str(), &file_info);
+#endif
+	if (result != 0)
 	{
 		WARN_LOG(COMMON, "GetSize: failed %s: No such file", filename.c_str());
 		return 0;
 	}
 
-	if (IsDirectory(filename))
+	if (IsDirectory(file_info))
 	{
 		WARN_LOG(COMMON, "GetSize: failed %s: is a directory", filename.c_str());
 		return 0;
 	}
-	struct stat64 buf;
-	if (stat64(filename.c_str(), &buf) == 0)
-	{
-		DEBUG_LOG(COMMON, "GetSize: %s: %lld",
-				filename.c_str(), (long long)buf.st_size);
-		return buf.st_size;
-	}
 
-	ERROR_LOG(COMMON, "GetSize: Stat failed %s: %s",
-			filename.c_str(), GetLastErrorMsg());
-	return 0;
+	DEBUG_LOG(COMMON, "GetSize: %s: %lld", filename.c_str(), (long long)file_info.st_size);
+	return file_info.st_size;
 }
 
 // Overloaded GetSize, accepts file descriptor
@@ -451,7 +497,7 @@ bool CreateEmptyFile(const std::string &filename)
 {
 	INFO_LOG(COMMON, "CreateEmptyFile: %s", filename.c_str()); 
 
-	FILE *pFile = fopen(filename.c_str(), "wb");
+	FILE *pFile = OpenCFile(filename, "wb");
 	if (!pFile) {
 		ERROR_LOG(COMMON, "CreateEmptyFile: failed %s: %s",
 				  filename.c_str(), GetLastErrorMsg());
@@ -461,80 +507,6 @@ bool CreateEmptyFile(const std::string &filename)
 	return true;
 }
 
-
-// Scans the directory tree gets, starting from _Directory and adds the
-// results into parentEntry. Returns the number of files+directories found
-u32 ScanDirectoryTree(const std::string &directory, FSTEntry& parentEntry)
-{
-	INFO_LOG(COMMON, "ScanDirectoryTree: directory %s", directory.c_str());
-	// How many files + directories we found
-	u32 foundEntries = 0;
-#ifdef _WIN32
-	// Find the first file in the directory.
-	WIN32_FIND_DATA ffd;
-
-	HANDLE hFind = FindFirstFile((directory + "\\*").c_str(), &ffd);
-	if (hFind == INVALID_HANDLE_VALUE)
-	{
-		FindClose(hFind);
-		return foundEntries;
-	}
-	// windows loop
-	do
-	{
-		FSTEntry entry;
-		const std::string virtualName(ffd.cFileName);
-#else
-	struct dirent_large { struct dirent entry; char padding[FILENAME_MAX+1]; };
-	struct dirent_large diren;
-	struct dirent *result = NULL;
-
-	DIR *dirp = opendir(directory.c_str());
-	if (!dirp)
-		return 0;
-
-	// non windows loop
-	while (!readdir_r(dirp, (dirent*)&diren, &result) && result)
-	{
-		FSTEntry entry;
-		const std::string virtualName(result->d_name);
-#endif
-		// check for "." and ".."
-		if (((virtualName[0] == '.') && (virtualName[1] == '\0')) ||
-				((virtualName[0] == '.') && (virtualName[1] == '.') && 
-				 (virtualName[2] == '\0')))
-			continue;
-		entry.virtualName = virtualName;
-		entry.physicalName = directory;
-		entry.physicalName += DIR_SEP + entry.virtualName;
-
-		if (IsDirectory(entry.physicalName.c_str()))
-		{
-			entry.isDirectory = true;
-			// is a directory, lets go inside
-			entry.size = ScanDirectoryTree(entry.physicalName, entry);
-			foundEntries += (u32)entry.size;
-		}
-		else
-		{ // is a file 
-			entry.isDirectory = false;
-			entry.size = GetSize(entry.physicalName.c_str());
-		}
-		++foundEntries;
-		// Push into the tree
-		parentEntry.children.push_back(entry);		
-#ifdef _WIN32 
-	} while (FindNextFile(hFind, &ffd) != 0);
-	FindClose(hFind);
-#else
-	}
-	closedir(dirp);
-#endif
-	// Return number of entries found.
-	return foundEntries;
-}
-
-	
 // Deletes the given directory and anything under it. Returns true on success.
 bool DeleteDirRecursively(const std::string &directory)
 {
@@ -542,7 +514,7 @@ bool DeleteDirRecursively(const std::string &directory)
 #ifdef _WIN32
 	// Find the first file in the directory.
 	WIN32_FIND_DATA ffd;
-	HANDLE hFind = FindFirstFile((directory + "\\*").c_str(), &ffd);
+	HANDLE hFind = FindFirstFile(ConvertUTF8ToWString(directory + "\\*").c_str(), &ffd);
 
 	if (hFind == INVALID_HANDLE_VALUE)
 	{
@@ -553,7 +525,7 @@ bool DeleteDirRecursively(const std::string &directory)
 	// windows loop
 	do
 	{
-		const std::string virtualName = ffd.cFileName;
+		const std::string virtualName = ConvertWStringToUTF8(ffd.cFileName);
 #else
 	struct dirent dirent, *result = NULL;
 	DIR *dirp = opendir(directory.c_str());
@@ -576,12 +548,24 @@ bool DeleteDirRecursively(const std::string &directory)
 		if (IsDirectory(newPath))
 		{
 			if (!DeleteDirRecursively(newPath))
+			{
+				#ifndef _WIN32
+				closedir(dirp);
+				#endif
+				
 				return false;
+			}
 		}
 		else
 		{
 			if (!File::Delete(newPath))
+			{
+				#ifndef _WIN32
+				closedir(dirp);
+				#endif
+				
 				return false;
+			}
 		}
 
 #ifdef _WIN32
@@ -657,114 +641,20 @@ bool SetCurrentDir(const std::string &directory)
 	return __chdir(directory.c_str()) == 0;
 }
 
-#if defined(__APPLE__)
-std::string GetBundleDirectory() 
-{
-	CFURLRef BundleRef;
-	char AppBundlePath[MAXPATHLEN];
-	// Get the main bundle for the app
-	BundleRef = CFBundleCopyBundleURL(CFBundleGetMainBundle());
-	CFStringRef BundlePath = CFURLCopyFileSystemPath(BundleRef, kCFURLPOSIXPathStyle);
-	CFStringGetFileSystemRepresentation(BundlePath, AppBundlePath, sizeof(AppBundlePath));
-	CFRelease(BundleRef);
-	CFRelease(BundlePath);
-
-	return AppBundlePath;
-}
-#endif
-
 #ifdef _WIN32
-std::string &GetExeDirectory()
+std::wstring &GetExeDirectory()
 {
-	static std::string DolphinPath;
+	static std::wstring DolphinPath;
 	if (DolphinPath.empty())
 	{
-		char Dolphin_exe_Path[2048];
-		GetModuleFileNameA(NULL, Dolphin_exe_Path, 2048);
+		wchar_t Dolphin_exe_Path[2048];
+		GetModuleFileName(NULL, Dolphin_exe_Path, 2048);
 		DolphinPath = Dolphin_exe_Path;
 		DolphinPath = DolphinPath.substr(0, DolphinPath.find_last_of('\\'));
 	}
 	return DolphinPath;
 }
 #endif
-
-std::string GetSysDirectory()
-{
-	std::string sysDir;
-
-#if defined (__APPLE__)
-	sysDir = GetBundleDirectory();
-	sysDir += DIR_SEP;
-	sysDir += SYSDATA_DIR;
-#else
-	sysDir = SYSDATA_DIR;
-#endif
-	sysDir += DIR_SEP;
-
-	INFO_LOG(COMMON, "GetSysDirectory: Setting to %s:", sysDir.c_str());
-	return sysDir;
-}
-
-// Returns a string with a Dolphin data dir or file in the user's home
-// directory. To be used in "multi-user" mode (that is, installed).
-std::string &GetUserPath(const unsigned int DirIDX, const std::string &newPath)
-{
-	static std::string paths[NUM_PATH_INDICES];
-
-	// Set up all paths and files on the first run
-	if (paths[D_USER_IDX].empty())
-	{
-#ifdef _WIN32
-		// TODO: use GetExeDirectory() here instead of ROOT_DIR so that if the cwd is changed we still have the correct paths?
-		paths[D_USER_IDX] = ROOT_DIR DIR_SEP USERDATA_DIR DIR_SEP;
-#elif defined(__SYMBIAN32__)
-        paths[D_USER_IDX] = "E:" DIR_SEP "PPSSPP" DIR_SEP;
-#else
-		if (File::Exists(ROOT_DIR DIR_SEP USERDATA_DIR))
-			paths[D_USER_IDX] = ROOT_DIR DIR_SEP USERDATA_DIR DIR_SEP;
-		else
-			paths[D_USER_IDX] = std::string(getenv("HOME")) + DIR_SEP DOLPHIN_DATA_DIR DIR_SEP;
-#endif
-		INFO_LOG(COMMON, "GetUserPath: Setting user directory to %s:", paths[D_USER_IDX].c_str());
-
-		paths[D_CONFIG_IDX]			= paths[D_USER_IDX] + CONFIG_DIR DIR_SEP;
-		paths[D_SCREENSHOTS_IDX]	= paths[D_USER_IDX] + SCREENSHOTS_DIR DIR_SEP;
-		paths[D_LOGS_IDX]			= paths[D_USER_IDX] + LOGS_DIR DIR_SEP;
-    paths[F_CONFIG_IDX]		= paths[D_CONFIG_IDX] + CONFIG_FILE;
-		paths[F_MAINLOG_IDX]		= paths[D_LOGS_IDX] + MAIN_LOG;
-	}
-
-	return paths[DirIDX];
-}
-
-bool WriteStringToFile(bool text_file, const std::string &str, const char *filename)
-{
-	FILE *f = fopen(filename, text_file ? "w" : "wb");
-	if (!f)
-		return false;
-	size_t len = str.size();
-	if (len != fwrite(str.data(), 1, str.size(), f))	// TODO: string::data() may not be contiguous
-	{
-		fclose(f);
-		return false;
-	}
-	fclose(f);
-	return true;
-}
-
-bool ReadFileToString(bool text_file, const char *filename, std::string &str)
-{
-	FILE *f = fopen(filename, text_file ? "r" : "rb");
-	if (!f)
-		return false;
-	size_t len = (size_t)GetSize(f);
-	char *buf = new char[len + 1];
-	buf[fread(buf, 1, len, f)] = 0;
-	str = std::string(buf, len);
-	fclose(f);
-	delete [] buf;
-	return true;
-}
 
 IOFile::IOFile()
 	: m_file(NULL), m_good(true)
@@ -788,8 +678,8 @@ IOFile::~IOFile()
 bool IOFile::Open(const std::string& filename, const char openmode[])
 {
 	Close();
-#ifdef _WIN32
-	fopen_s(&m_file, filename.c_str(), openmode);
+#if defined(_WIN32) && defined(UNICODE)
+	_wfopen_s(&m_file, ConvertUTF8ToWString(filename).c_str(), ConvertUTF8ToWString(openmode).c_str());
 #else
 	m_file = fopen(filename.c_str(), openmode);
 #endif

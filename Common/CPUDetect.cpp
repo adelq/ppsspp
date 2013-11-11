@@ -15,7 +15,14 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
+#ifdef ANDROID
+#include <sys/stat.h>
+#include <fcntl.h>
+#endif
+
 #include <memory.h>
+#include "base/logging.h"
+#include "base/basictypes.h"
 
 #ifdef _WIN32
 #define _interlockedbittestandset workaround_ms_header_bug_platform_sdk6_set
@@ -29,66 +36,52 @@
 #undef _interlockedbittestandreset64
 #else
 
-#ifndef _M_GENERIC
+#if !defined(_M_GENERIC) && !defined(MIPS)
 #include <xmmintrin.h>
 #endif
 
 #if defined __FreeBSD__
 #include <sys/types.h>
 #include <machine/cpufunc.h>
-#else
-static inline void do_cpuid(unsigned int *eax, unsigned int *ebx,
-						    unsigned int *ecx, unsigned int *edx)
+#elif !defined(MIPS)
+
+void __cpuidex(int regs[4], int cpuid_leaf, int ecxval)
 {
-#if defined _M_GENERIC
-	(*eax) = (*ebx) = (*ecx) = (*edx) = 0;
-#elif defined _LP64
-	// Note: EBX is reserved on Mac OS X and in PIC on Linux, so it has to
-	// restored at the end of the asm block.
-	__asm__ (
-		"cpuid;"
-		"movl  %%ebx,%1;"
-		: "=a" (*eax),
-		  "=S" (*ebx),
-		  "=c" (*ecx),
-		  "=d" (*edx)
-		: "a"  (*eax)
-		: "rbx"
-		);
+#ifdef ANDROID
+	// Use the /dev/cpu/%i/cpuid interface
+	int f = open("/dev/cpu/0/cpuid", O_RDONLY);
+	if (f) {
+		lseek64(f, ((uint64_t)ecxval << 32) | cpuid_leaf, SEEK_SET);
+		read(f, (void *)regs, 16);
+		close(f);
+	} else {
+		ELOG("CPUID %08x failed!", cpuid_leaf);
+	}
+#elif defined(__i386__) && defined(__PIC__)
+	asm (
+		"xchgl %%ebx, %1;\n\t"
+		"cpuid;\n\t"
+		"xchgl %%ebx, %1;\n\t"
+		:"=a" (regs[0]), "=r" (regs[1]), "=c" (regs[2]), "=d" (regs[3])
+		:"a" (cpuid_leaf), "c" (ecxval));
 #else
-	__asm__ (
-		"cpuid;"
-		"movl  %%ebx,%1;"
-		: "=a" (*eax),
-		  "=S" (*ebx),
-		  "=c" (*ecx),
-		  "=d" (*edx)
-		: "a"  (*eax)
-		: "ebx"
-		);
+	asm (
+		"cpuid;\n\t"
+		:"=a" (regs[0]), "=b" (regs[1]), "=c" (regs[2]), "=d" (regs[3])
+		:"a" (cpuid_leaf), "c" (ecxval));
 #endif
 }
-#endif /* defined __FreeBSD__ */
-
-static void __cpuid(int info[4], int x)
+void __cpuid(int regs[4], int cpuid_leaf)
 {
-#if defined __FreeBSD__
-    do_cpuid((unsigned int)x, (unsigned int*)info);
-#else
-	unsigned int eax = x, ebx = 0, ecx = 0, edx = 0;
-	do_cpuid(&eax, &ebx, &ecx, &edx);
-	info[0] = eax;
-	info[1] = ebx;
-	info[2] = ecx;
-	info[3] = edx;
-#endif
+	__cpuidex(regs, cpuid_leaf, 0);
 }
 
+#endif
 #endif
 
 #include "Common.h"
 #include "CPUDetect.h"
-#include "StringUtil.h"
+#include "StringUtils.h"
 
 CPUInfo cpu_info;
 
@@ -115,19 +108,19 @@ void CPUInfo::Detect()
 	OS64bit = (f64 == TRUE) ? true : false;
 #endif
 #endif
-	
+
 	// Set obvious defaults, for extra safety
 	if (Mode64bit) {
 		bSSE = true;
 		bSSE2 = true;
 		bLongMode = true;
 	}
-	
+
 	// Assume CPU supports the CPUID instruction. Those that don't can barely
 	// boot modern OS:es anyway.
 	int cpu_id[4];
 	memset(cpu_string, 0, sizeof(cpu_string));
-	
+
 	// Detect CPU's CPUID capabilities, and grab cpu string
 	__cpuid(cpu_id, 0x00000000);
 	u32 max_std_fn = cpu_id[0];  // EAX
@@ -142,10 +135,10 @@ void CPUInfo::Detect()
 		vendor = VENDOR_AMD;
 	else
 		vendor = VENDOR_OTHER;
-	
+
 	// Set reasonable default brand string even if brand string not available.
 	strcpy(brand_string, cpu_string);
-	
+
 	// Detect family and other misc stuff.
 	bool ht = false;
 	HTT = ht;
@@ -176,22 +169,34 @@ void CPUInfo::Detect()
 	if (max_ex_fn >= 0x80000001) {
 		// Check for more features.
 		__cpuid(cpu_id, 0x80000001);
-		bool cmp_legacy = false;
 		if (cpu_id[2] & 1) bLAHFSAHF64 = true;
-		if (cpu_id[2] & 2) cmp_legacy = true; //wtf is this?
+		// CmpLegacy (bit 2) is deprecated.
 		if ((cpu_id[3] >> 29) & 1) bLongMode = true;
 	}
 
 	num_cores = (logical_cpu_count == 0) ? 1 : logical_cpu_count;
-	
+
 	if (max_ex_fn >= 0x80000008) {
 		// Get number of cores. This is a bit complicated. Following AMD manual here.
 		__cpuid(cpu_id, 0x80000008);
 		int apic_id_core_id_size = (cpu_id[2] >> 12) & 0xF;
 		if (apic_id_core_id_size == 0) {
 			if (ht) {
-				// New mechanism for modern Intel CPUs.
-				if (vendor == VENDOR_INTEL) {
+				// 0x0B is the preferred method on Core i series processors.
+				// Inspired by https://github.com/D-Programming-Language/druntime/blob/23b0d1f41e27638bda2813af55823b502195a58d/src/core/cpuid.d#L562.
+				bool hasLeafB = false;
+				if (vendor == VENDOR_INTEL && max_std_fn >= 0x0B) {
+					__cpuidex(cpu_id, 0x0B, 0);
+					if (cpu_id[1] != 0) {
+						logical_cpu_count = cpu_id[1] & 0xFFFF;
+						__cpuidex(cpu_id, 0x0B, 1);
+						int totalThreads = cpu_id[1] & 0xFFFF;
+						num_cores = totalThreads / logical_cpu_count;
+						hasLeafB = true;
+					}
+				}
+				// Old new mechanism for modern Intel CPUs.
+				if (!hasLeafB && vendor == VENDOR_INTEL) {
 					__cpuid(cpu_id, 0x00000004);
 					int cores_x_package = ((cpu_id[0] >> 26) & 0x3F) + 1;
 					HTT = (cores_x_package < logical_cpu_count);
@@ -204,7 +209,7 @@ void CPUInfo::Detect()
 			// Use AMD's new method.
 			num_cores = (cpu_id[2] & 0xFF) + 1;
 		}
-	} 
+	}
 }
 
 // Turn the cpu info into a string we can show

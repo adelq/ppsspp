@@ -23,7 +23,9 @@
 #pragma once
 
 #include "../Globals.h"
-#include "../../Common/ChunkFile.h"
+#include "ChunkFile.h"
+
+#include "Core/HW/BufferQueue.h"
 
 enum {
 	PSP_SAS_VOICES_MAX = 32,
@@ -48,6 +50,17 @@ enum {
 
 	PSP_SAS_ENVELOPE_HEIGHT_MAX = 0x40000000,
 	PSP_SAS_ENVELOPE_FREQ_MAX = 0x7FFFFFFF,
+
+	PSP_SAS_EFFECT_TYPE_OFF = -1,
+	PSP_SAS_EFFECT_TYPE_ROOM = 0,
+	PSP_SAS_EFFECT_TYPE_UNK1 = 1,
+	PSP_SAS_EFFECT_TYPE_UNK2 = 2,
+	PSP_SAS_EFFECT_TYPE_UNK3 = 3,
+	PSP_SAS_EFFECT_TYPE_HALL = 4,
+	PSP_SAS_EFFECT_TYPE_SPACE = 5,
+	PSP_SAS_EFFECT_TYPE_ECHO = 6,
+	PSP_SAS_EFFECT_TYPE_DELAY = 7,
+	PSP_SAS_EFFECT_TYPE_PIPE = 8,
 };
 
 struct WaveformEffect
@@ -64,20 +77,18 @@ struct WaveformEffect
 enum VoiceType {
 	VOICETYPE_OFF,
 	VOICETYPE_VAG,  // default
-	VOICETYPE_PCM,
 	VOICETYPE_NOISE,
-	VOICETYPE_ATRAC3,
 	VOICETYPE_TRIWAVE,  // are these used? there are functions for them (sceSetTriangularWave)
 	VOICETYPE_PULSEWAVE,
+	VOICETYPE_PCM,
+	VOICETYPE_ATRAC3,
 };
 
 // VAG is a Sony ADPCM audio compression format, which goes all the way back to the PSX.
 // It compresses 28 16-bit samples into a block of 16 bytes.
-// TODO: Get rid of the doubles, making sure it does not impact sound quality.
-// Doubles are pretty fast on Android devices these days though.
 class VagDecoder {
 public:
-	VagDecoder() : data_(0), read_(0) {}
+	VagDecoder() : data_(0), read_(0), end_(true) {}
 	void Start(u32 dataPtr, int vagSize, bool loopEnabled);
 
 	void GetSamples(s16 *outSamples, int numSamples);
@@ -85,8 +96,11 @@ public:
 	void DecodeBlock(u8 *&readp);
 	bool End() const { return end_; }
 
+	void DoState(PointerWrap &p);
+
 private:
-	double samples[28];
+	void DecodeSample(int i, int sample, int predict_nr);
+	int samples[28];
 	int curSample;
 
 	u32 data_;
@@ -96,12 +110,27 @@ private:
 	int numBlocks_;
 
 	// rolling state. start at 0, should probably reset to 0 on loops?
-	double s_1;
-	double s_2;
+	int s_1;
+	int s_2;
 
 	bool loopEnabled_;
 	bool loopAtNextBlock_;
 	bool end_;
+};
+
+class SasAtrac3 {
+public:
+	SasAtrac3() : contextAddr(0), atracID(-1), sampleQueue(0) {}
+	~SasAtrac3() { if (sampleQueue) delete sampleQueue; }
+	int setContext(u32 context);
+	int getNextSamples(s16* outbuf, int wantedSamples);
+	int addStreamData(u8* buf, u32 addbytes);
+	void DoState(PointerWrap &p);
+
+private:
+	u32 contextAddr;
+	int atracID;
+	BufferQueue *sampleQueue;
 };
 
 // Max height: 0x40000000 I think
@@ -119,7 +148,7 @@ public:
 	void Step();
 
 	int GetHeight() const {
-		return height_ > PSP_SAS_ENVELOPE_HEIGHT_MAX ? PSP_SAS_ENVELOPE_HEIGHT_MAX : height_;
+		return height_ > (s64)PSP_SAS_ENVELOPE_HEIGHT_MAX ? (s64)PSP_SAS_ENVELOPE_HEIGHT_MAX : height_;
 	}
 	bool HasEnded() const {
 		return state_ == STATE_OFF;
@@ -133,6 +162,8 @@ public:
 	int sustainType;
 	int sustainLevel;
 	int releaseType;
+
+	void DoState(PointerWrap &p);
 
 private:
 	enum ADSRState {
@@ -155,7 +186,9 @@ private:
 struct SasVoice
 {
 	SasVoice()
-		: playing(false), paused(false), on(false),
+		: playing(false),
+			paused(false),
+			on(false),
 			type(VOICETYPE_OFF),
 			vagAddr(0),
 			vagSize(0),
@@ -166,16 +199,23 @@ struct SasVoice
 			pitch(PSP_SAS_PITCH_BASE),
 			loop(false),
 			noiseFreq(0),
-			volumeLeft(0),
-			volumeRight(0),
+			volumeLeft(PSP_SAS_VOL_MAX),
+			volumeRight(PSP_SAS_VOL_MAX),
 			volumeLeftSend(0),
-			volumeRightSend(0) {
+			volumeRightSend(0),
+			effectLeft(PSP_SAS_VOL_MAX),
+			effectRight(PSP_SAS_VOL_MAX) {
+		memset(resampleHist, 0, sizeof(resampleHist));
 	}
 
 	void Reset();
 	void KeyOn();
 	void KeyOff();
 	void ChangedParams(bool changedVag);
+
+	void DoState(PointerWrap &p);
+
+	void ReadSamples(s16 *output, int numSamples);
 
 	bool playing;
 	bool paused;  // a voice can be playing AND paused. In that case, it won't play.
@@ -187,6 +227,7 @@ struct SasVoice
 	int vagSize;
 	u32 pcmAddr;
 	int pcmSize;
+	int pcmIndex;
 	int sampleRate;
 
 	int sampleFrac;
@@ -197,13 +238,21 @@ struct SasVoice
 
 	int volumeLeft;
 	int volumeRight;
+
+	// I am pretty sure that volumeLeftSend and effectLeft really are the same thing (and same for right of course).
+	// We currently have nothing that ever modifies volume*Send.
+	// One game that uses an effect (probably a reverb) is MHU.
+
 	int volumeLeftSend;	// volume to "Send" (audio-lingo) to the effects processing engine, like reverb
 	int volumeRightSend;
+	int effectLeft;
+	int effectRight;
 	s16 resampleHist[2];
 
 	ADSREnvelope envelope;
 
 	VagDecoder vag;
+	SasAtrac3 atrac3;
 };
 
 class SasInstance
@@ -224,7 +273,13 @@ public:
 	int *sendBuffer;
 	s16 *resampleBuffer;
 
-	void Mix(u32 outAddr);
+	FILE *audioDump;
+
+	void Mix(u32 outAddr, u32 inAddr = 0, int leftVol = 0, int rightVol = 0);
+	void MixVoice(SasVoice &voice);
+
+	// Applies reverb to send buffer, according to waveformEffect.
+	void ApplyReverb();
 
 	void DoState(PointerWrap &p);
 

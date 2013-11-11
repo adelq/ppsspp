@@ -21,7 +21,7 @@
 #include "LogManager.h"
 
 #ifdef _WIN32
-#include <windows.h>
+#include "CommonWindows.h"
 #endif
 
 class ConsoleListener : public LogListener
@@ -30,7 +30,8 @@ public:
 	ConsoleListener();
 	~ConsoleListener();
 
-	void Open(bool Hidden = false, int Width = 200, int Height = 100, const char * Name = "DebugConsole (PPSSPP)");
+	void Init(bool AutoOpen = true, int Width = 200, int Height = 100, const char * Name = "DebugConsole (PPSSPP)");
+	void Open();
 	void UpdateHandle();
 	void Close();
 	bool IsOpen();
@@ -43,14 +44,32 @@ public:
 	void Log(LogTypes::LOG_LEVELS, const char *Text);
 	void ClearScreen(bool Cursor = true);
 
-  void Show(bool bShow);
-  bool Hidden() const { return bHidden; }
+	void Show(bool bShow);
+	bool Hidden() const { return bHidden; }
 private:
 #ifdef _WIN32
 	HWND GetHwnd(void);
 	HANDLE hConsole;
+
+	static unsigned int WINAPI RunThread(void *lpParam);
+	void LogWriterThread();
+	void SendToThread(LogTypes::LOG_LEVELS Level, const char *Text);
+	void WriteToConsole(LogTypes::LOG_LEVELS Level, const char *Text, size_t Len);
+
+	static int refCount;
+	static HANDLE hThread;
+	static HANDLE hTriggerEvent;
+	static CRITICAL_SECTION criticalSection;
+
+	static char *logPending;
+	static volatile u32 logPendingReadPos;
+	static volatile u32 logPendingWritePos;
+
+	int openWidth_;
+	int openHeight_;
+	std::wstring title_;
 #endif
-  bool bHidden;
+	bool bHidden;
 	bool bUseColor;
 };
 

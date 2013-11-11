@@ -5,24 +5,20 @@
 #define GCC_VER(x,y,z)	((x) * 10000 + (y) * 100 + (z))
 #define GCC_VERSION GCC_VER(__GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__)
 
-#if GCC_VERSION >= GCC_VER(4,4,0) && __GXX_EXPERIMENTAL_CXX0X__ && !defined(ANDROID) && !defined(__SYMBIAN32__)
-// GCC 4.4 provides <mutex>
+// Note: __MAC_10_7 is defined on 10.7+.
+#if (GCC_VERSION >= GCC_VER(4,4,0) && __GXX_EXPERIMENTAL_CXX0X__ || defined(__APPLE__)) \
+/* GCC 4.4 provides <mutex>, except on these platforms: */ \
+    && !defined(ANDROID) && !defined(__SYMBIAN32__) && !defined(IOS) && !defined(MACGNUSTD)
 #include <mutex>
 #else
 
 // partial <mutex> implementation for win32/pthread
-
 #include <algorithm>
 
-#if defined(_WIN32)
-// WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-
-#else
-// POSIX
+#if defined(_WIN32) // WIN32
+#include "CommonWindows.h"
+#else // POSIX
 #include <pthread.h>
-
 #endif
 
 #if (_MSC_VER >= 1600) || (GCC_VERSION >= GCC_VER(4,3,0) && __GXX_EXPERIMENTAL_CXX0X__)
@@ -318,9 +314,12 @@ public:
 
 	mutex_type* release()
 	{
-		return mutex();
+		mutex_type* const ret = mutex();
+		
 		pm = NULL;
 		owns = false;
+		
+		return ret;
 	}
 
 	bool owns_lock() const

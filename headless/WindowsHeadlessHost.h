@@ -22,27 +22,28 @@
 #undef HEADLESSHOST_CLASS
 #define HEADLESSHOST_CLASS WindowsHeadlessHost
 
-#include <windows.h>
+#include "Common/CommonWindows.h"
 
 // TODO: Get rid of this junk
 class WindowsHeadlessHost : public HeadlessHost
 {
 public:
-	virtual void InitGL();
-	virtual void BeginFrame();
-	virtual void EndFrame();
+	virtual bool InitGL(std::string *error_message);
 	virtual void ShutdownGL();
-	virtual bool isGLWorking() { return glOkay; }
+
+	virtual void SwapBuffers();
 
 	virtual void SendDebugOutput(const std::string &output);
+	virtual void SendDebugScreenshot(const u8 *pixbuf, u32 w, u32 h);
+	virtual void SetComparisonScreenshot(const std::string &filename);
 
 private:
 	bool ResizeGL();
 	void LoadNativeAssets();
+	void SendOrCollectDebugOutput(const std::string &output);
 
-	bool glOkay;
 	HWND hWnd;
 	HDC hDC;
 	HGLRC hRC;
-	FILE *out;
+	std::string comparisonScreenshot;
 };

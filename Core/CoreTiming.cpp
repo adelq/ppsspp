@@ -21,6 +21,7 @@
 
 #include "MsgHandler.h"
 #include "StdMutex.h"
+#include "Atomics.h"
 #include "CoreTiming.h"
 #include "Core.h"
 #include "HLE/sceKernelThread.h"
@@ -66,13 +67,17 @@ Event *tsLast;
 Event *eventPool = 0;
 Event *eventTsPool = 0;
 int allocatedTsEvents = 0;
+// Optimization to skip MoveEvents when possible.
+volatile u32 hasTsEvents = false;
 
 // Downcount has been moved to currentMIPS, to save a couple of clocks in every ARM JIT block
 // as we can already reach that structure through a register.
 int slicelength;
 
-s64 globalTimer;
+MEMORY_ALIGNED16(s64) globalTimer;
 s64 idledCycles;
+s64 lastGlobalTimeTicks;
+s64 lastGlobalTimeUs;
 
 static std::recursive_mutex externalEventSection;
 
@@ -81,6 +86,11 @@ void (*advanceCallback)(int cyclesExecuted) = NULL;
 
 void SetClockFrequencyMHz(int cpuMhz)
 {
+	// When the mhz changes, we keep track of what "time" it was before hand.
+	// This way, time always moves forward, even if mhz is changed.
+	lastGlobalTimeUs = GetGlobalTimeUs();
+	lastGlobalTimeTicks = GetTicks();
+
 	CPU_HZ = cpuMhz * 1000000;
 	// TODO: Rescale times of scheduled events?
 }
@@ -88,6 +98,13 @@ void SetClockFrequencyMHz(int cpuMhz)
 int GetClockFrequencyMHz()
 {
 	return CPU_HZ / 1000000;
+}
+
+u64 GetGlobalTimeUs()
+{
+	s64 ticksSinceLast = GetTicks() - lastGlobalTimeTicks;
+	s64 usSinceLast = ticksSinceLast / GetClockFrequencyMHz();
+	return lastGlobalTimeUs + usSinceLast;
 }
 
 
@@ -134,7 +151,7 @@ int RegisterEvent(const char *name, TimedCallback callback)
 
 void AntiCrashCallback(u64 userdata, int cyclesLate)
 {
-	ERROR_LOG(CPU, "Savestate broken: an unregistered event was called.");
+	ERROR_LOG(TIME, "Savestate broken: an unregistered event was called.");
 	Core_Halt("invalid timing events");
 }
 
@@ -159,6 +176,9 @@ void Init()
 	slicelength = INITIAL_SLICE_LENGTH;
 	globalTimer = 0;
 	idledCycles = 0;
+	lastGlobalTimeTicks = 0;
+	lastGlobalTimeUs = 0;
+	hasTsEvents = 0;
 }
 
 void Shutdown()
@@ -200,7 +220,7 @@ void ScheduleEvent_Threadsafe(s64 cyclesIntoFuture, int event_type, u64 userdata
 {
 	std::lock_guard<std::recursive_mutex> lk(externalEventSection);
 	Event *ne = GetNewTsEvent();
-	ne->time = globalTimer + cyclesIntoFuture;
+	ne->time = GetTicks() + cyclesIntoFuture;
 	ne->type = event_type;
 	ne->next = 0;
 	ne->userdata = userdata;
@@ -209,6 +229,8 @@ void ScheduleEvent_Threadsafe(s64 cyclesIntoFuture, int event_type, u64 userdata
 	if(tsLast)
 		tsLast->next = ne;
 	tsLast = ne;
+
+	Common::AtomicStoreRelease(hasTsEvents, 1);
 }
 
 // Same as ScheduleEvent_Threadsafe(0, ...) EXCEPT if we are already on the CPU thread
@@ -265,9 +287,9 @@ void ScheduleEvent(s64 cyclesIntoFuture, int event_type, u64 userdata)
 }
 
 // Returns cycles left in timer.
-u64 UnscheduleEvent(int event_type, u64 userdata)
+s64 UnscheduleEvent(int event_type, u64 userdata)
 {
-	u64 result = 0;
+	s64 result = 0;
 	if (!first)
 		return result;
 	while(first)
@@ -297,6 +319,57 @@ u64 UnscheduleEvent(int event_type, u64 userdata)
 
 			prev->next = ptr->next;
 			FreeEvent(ptr);
+			ptr = prev->next;
+		}
+		else
+		{
+			prev = ptr;
+			ptr = ptr->next;
+		}
+	}
+
+	return result;
+}
+
+s64 UnscheduleThreadsafeEvent(int event_type, u64 userdata)
+{
+	s64 result = 0;
+	std::lock_guard<std::recursive_mutex> lk(externalEventSection);
+	if (!tsFirst)
+		return result;
+	while(tsFirst)
+	{
+		if (tsFirst->type == event_type && tsFirst->userdata == userdata)
+		{
+			result = tsFirst->time - globalTimer;
+
+			Event *next = tsFirst->next;
+			FreeTsEvent(tsFirst);
+			tsFirst = next;
+		}
+		else
+		{
+			break;
+		}
+	}
+	if (!tsFirst)
+	{
+		tsLast = NULL;
+		return result;
+	}
+
+	Event *prev = tsFirst;
+	Event *ptr = prev->next;
+	while (ptr)
+	{
+		if (ptr->type == event_type && ptr->userdata == userdata)
+		{
+			result = ptr->time - globalTimer;
+
+			prev->next = ptr->next;
+			if (ptr == tsLast)
+				tsLast = prev;
+			FreeTsEvent(ptr);
 			ptr = prev->next;
 		}
 		else
@@ -387,6 +460,7 @@ void RemoveThreadsafeEvent(int event_type)
 	}
 	if (!tsFirst)
 	{
+		tsLast = NULL;
 		return;
 	}
 	Event *prev = tsFirst;
@@ -396,6 +470,8 @@ void RemoveThreadsafeEvent(int event_type)
 		if (ptr->type == event_type)
 		{	
 			prev->next = ptr->next;
+			if (ptr == tsLast)
+				tsLast = prev;
 			FreeTsEvent(ptr);
 			ptr = prev->next;
 		}
@@ -408,7 +484,7 @@ void RemoveThreadsafeEvent(int event_type)
 }
 
 void RemoveAllEvents(int event_type)
-{	
+{
 	RemoveThreadsafeEvent(event_type);
 	RemoveEvent(event_type);
 }
@@ -416,16 +492,11 @@ void RemoveAllEvents(int event_type)
 //This raise only the events required while the fifo is processing data
 void ProcessFifoWaitEvents()
 {
-	MoveEvents();
-
-	if (!first)
-		return;
-
 	while (first)
 	{
 		if (first->time <= globalTimer)
 		{
-//			LOG(CPU, "[Scheduler] %s		 (%lld, %lld) ", 
+//			LOG(TIMER, "[Scheduler] %s		 (%lld, %lld) ", 
 //				first->name ? first->name : "?", (u64)globalTimer, (u64)first->time);
 			Event* evt = first;
 			first = first->next;
@@ -441,8 +512,10 @@ void ProcessFifoWaitEvents()
 
 void MoveEvents()
 {
+	Common::AtomicStoreRelease(hasTsEvents, 0);
+
 	std::lock_guard<std::recursive_mutex> lk(externalEventSection);
-		// Move events from async queue into main queue
+	// Move events from async queue into main queue
 	while (tsFirst)
 	{
 		Event *next = tsFirst->next;
@@ -462,18 +535,31 @@ void MoveEvents()
 	}
 }
 
+void ForceCheck()
+{
+	int cyclesExecuted = slicelength - currentMIPS->downcount;
+	globalTimer += cyclesExecuted;
+	// This will cause us to check for new events immediately.
+	currentMIPS->downcount = 0;
+	// But let's not eat a bunch more time in Advance() because of this.
+	slicelength = 0;
+}
+
 void Advance()
 {
 	int cyclesExecuted = slicelength - currentMIPS->downcount;
 	globalTimer += cyclesExecuted;
 	currentMIPS->downcount = slicelength;
 
+	if (Common::AtomicLoadAcquire(hasTsEvents))
+		MoveEvents();
 	ProcessFifoWaitEvents();
 
 	if (!first)
 	{
-		// WARN_LOG(CPU, "WARNING - no events in queue. Setting currentMIPS->downcount to 10000");
+		// WARN_LOG(TIMER, "WARNING - no events in queue. Setting currentMIPS->downcount to 10000");
 		currentMIPS->downcount += 10000;
+		slicelength = 10000;
 	}
 	else
 	{
@@ -491,7 +577,7 @@ void LogPendingEvents()
 	Event *ptr = first;
 	while (ptr)
 	{
-		//INFO_LOG(CPU, "PENDING: Now: %lld Pending: %lld Type: %d", globalTimer, ptr->time, ptr->type);
+		//INFO_LOG(TIMER, "PENDING: Now: %lld Pending: %lld Type: %d", globalTimer, ptr->time, ptr->type);
 		ptr = ptr->next;
 	}
 }
@@ -516,7 +602,7 @@ void Idle(int maxIdle)
 		}
 	}
 
-	DEBUG_LOG(CPU, "Idle for %i cycles! (%f ms)", cyclesDown, cyclesDown / (float)(CPU_HZ * 0.001f));
+	VERBOSE_LOG(TIME, "Idle for %i cycles! (%f ms)", cyclesDown, cyclesDown / (float)(CPU_HZ * 0.001f));
 
 	idledCycles += cyclesDown;
 	currentMIPS->downcount -= cyclesDown;
@@ -554,6 +640,10 @@ void DoState(PointerWrap &p)
 {
 	std::lock_guard<std::recursive_mutex> lk(externalEventSection);
 
+	auto s = p.Section("CoreTiming", 1, 2);
+	if (!s)
+		return;
+
 	int n = (int) event_types.size();
 	p.Do(n);
 	// These (should) be filled in later by the modules.
@@ -566,7 +656,14 @@ void DoState(PointerWrap &p)
 	p.Do(slicelength);
 	p.Do(globalTimer);
 	p.Do(idledCycles);
-	p.DoMarker("CoreTiming");
+
+	if (s >= 2) {
+		p.Do(lastGlobalTimeTicks);
+		p.Do(lastGlobalTimeUs);
+	} else {
+		lastGlobalTimeTicks = 0;
+		lastGlobalTimeUs = 0;
+	}
 }
 
 }	// namespace

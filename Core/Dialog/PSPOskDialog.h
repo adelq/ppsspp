@@ -17,9 +17,9 @@
 
 #pragma once
 
-#include "PSPDialog.h"
-#include "../Core/MemMap.h"
-
+#include "Core/Dialog/PSPDialog.h"
+#include "Core/MemMap.h"
+#include "Common/CommonTypes.h"
 
 
 /**
@@ -91,53 +91,114 @@ enum SceUtilityOskInputType
 	PSP_UTILITY_OSK_INPUTTYPE_URL =						0x00080000
 };
 
+#if COMMON_LITTLE_ENDIAN
+typedef SceUtilityOskState SceUtilityOskState_le;
+typedef SceUtilityOskInputLanguage SceUtilityOskInputLanguage_le;
+typedef SceUtilityOskResult SceUtilityOskResult_le;
+#else
+typedef swap_struct_t<SceUtilityOskState, swap_32_t<SceUtilityOskState> > SceUtilityOskState_le;
+typedef swap_struct_t<SceUtilityOskInputLanguage, swap_32_t<SceUtilityOskInputLanguage> > SceUtilityOskInputLanguage_le;
+typedef swap_struct_t<SceUtilityOskResult, swap_32_t<SceUtilityOskResult> > SceUtilityOskResult_le;
+#endif
+
 /**
 * OSK Field data
 */
-typedef struct _SceUtilityOskData
+struct SceUtilityOskData
 {
 	/** Unknown. Pass 0. */
-	int unk_00;
+	s32_le unk_00;
 	/** Unknown. Pass 0. */
-	int unk_04;
+	s32_le unk_04;
 	/** One of ::SceUtilityOskInputLanguage */
-	int language;
+	SceUtilityOskInputLanguage_le language;
 	/** Unknown. Pass 0. */
-	int unk_12;
+	s32_le unk_12;
 	/** One or more of ::SceUtilityOskInputType (types that are selectable by pressing SELECT) */
-	int inputtype;
+	s32_le inputtype;
 	/** Number of lines */
-	int lines;
+	s32_le lines;
 	/** Unknown. Pass 0. */
-	int unk_24;
+	s32_le unk_24;
 	/** Description text */
-	u32 descPtr;
+	PSPPointer<u16_le> desc;
 	/** Initial text */
-	u32 intextPtr;
-	/** Length of output text */
-	int outtextlength;
+	PSPPointer<u16_le> intext;
+	// Length, in unsigned shorts, including the terminator.
+	u32_le outtextlength;
 	/** Pointer to the output text */
-	u32 outtextPtr;
+	PSPPointer<u16_le> outtext;
 	/** Result. One of ::SceUtilityOskResult */
-	int result;
-	/** The max text that can be input */
-	int outtextlimit;
+	SceUtilityOskResult_le result;
+	// Number of characters to allow, not including terminator (if less than outtextlength - 1.)
+	u32_le outtextlimit;
+};
 
-} SceUtilityOskData;
-
-/**
-* OSK parameters
-*/
-typedef struct _SceUtilityOskParams
+// Parameters to sceUtilityOskInitStart
+struct SceUtilityOskParams
 {
 	pspUtilityDialogCommon base;
-	int datacount;		/** Number of input fields */
-	u32 SceUtilityOskDataPtr; /** Pointer to the start of the data for the input fields */
-	int state;			/** The local OSK state, one of ::SceUtilityOskState */
-	int unk_60;/** Unknown. Pass 0 */
+	// Number of fields.
+	s32_le fieldCount;
+	// Pointer to an array of fields (see SceUtilityOskData.)
+	PSPPointer<SceUtilityOskData> fields;
+	SceUtilityOskState_le state;
+	// Maybe just padding?
+	s32_le unk_60;
 
-} SceUtilityOskParams;
+};
 
+// Internal enum, not from PSP.
+enum OskKeyboardDisplay
+{
+	OSK_KEYBOARD_LATIN_LOWERCASE,
+	OSK_KEYBOARD_LATIN_UPPERCASE,
+	OSK_KEYBOARD_HIRAGANA,
+	OSK_KEYBOARD_KATAKANA,
+	OSK_KEYBOARD_KOREAN,
+	OSK_KEYBOARD_RUSSIAN_LOWERCASE,
+	OSK_KEYBOARD_RUSSIAN_UPPERCASE,
+	OSK_KEYBOARD_LATIN_FW_LOWERCASE,
+	OSK_KEYBOARD_LATIN_FW_UPPERCASE,
+	// TODO: Something to do native?
+	OSK_KEYBOARD_COUNT
+};
+
+// Internal enum, not from PSP.
+enum OskKeyboardLanguage
+{
+	OSK_LANGUAGE_ENGLISH, //English half-width
+	OSK_LANGUAGE_JAPANESE,
+	OSK_LANGUAGE_KOREAN,
+	OSK_LANGUAGE_RUSSIAN,
+	OSK_LANGUAGE_ENGLISH_FW, //English full-width(mostly used in Japanese games)
+	OSK_LANGUAGE_COUNT
+};
+
+// Internal enum, not from PSP.
+enum
+{ 
+	LOWERCASE, 
+	UPPERCASE 
+};
+
+const OskKeyboardDisplay OskKeyboardCases[OSK_LANGUAGE_COUNT][2] =
+{
+	{ OSK_KEYBOARD_LATIN_LOWERCASE, OSK_KEYBOARD_LATIN_UPPERCASE },
+	{ OSK_KEYBOARD_HIRAGANA, OSK_KEYBOARD_KATAKANA },
+	{ OSK_KEYBOARD_KOREAN, OSK_KEYBOARD_KOREAN }, // Korean only has one case, so just repeat it.
+	{ OSK_KEYBOARD_RUSSIAN_LOWERCASE, OSK_KEYBOARD_RUSSIAN_UPPERCASE },
+	{ OSK_KEYBOARD_LATIN_FW_LOWERCASE, OSK_KEYBOARD_LATIN_FW_UPPERCASE }
+};
+
+static const std::string OskKeyboardNames[] =
+{
+	"en_US",
+	"ja_JP",
+	"ko_KR",
+	"ru_RU",
+	"English Full-width",
+};
 
 class PSPOskDialog: public PSPDialog {
 public:
@@ -145,20 +206,37 @@ public:
 	virtual ~PSPOskDialog();
 
 	virtual int Init(u32 oskPtr);
-	virtual int Update();
+	virtual int Update(int animSpeed);
+	virtual int Shutdown(bool force = false);
 	virtual void DoState(PointerWrap &p);
-private:
-	void HackyGetStringWide(std::string& _string, const u32 em_address);
-	void RenderKeyboard();
+	virtual pspUtilityDialogCommon *GetCommonParam();
 
-	SceUtilityOskParams oskParams;
-	SceUtilityOskData oskData;
+private:
+	void ConvertUCS2ToUTF8(std::string& _string, const PSPPointer<u16_le> em_address);
+	void ConvertUCS2ToUTF8(std::string& _string, const wchar_t *input);
+	void RenderKeyboard();
+#ifdef _WIN32
+	int NativeKeyboard();
+#endif
+
+	std::wstring CombinationString(bool isInput); // for Japanese, Korean
+	std::wstring CombinationKorean(bool isInput); // for Korea
+	void RemoveKorean(); // for Korean character removal
+	
+	u32 FieldMaxLength();
+	int GetIndex(const wchar_t* src, wchar_t ch);
+
+	PSPPointer<SceUtilityOskParams> oskParams;
 	std::string oskDesc;
 	std::string oskIntext;
 	std::string oskOuttext;
-	int oskParamsAddr;
 
 	int selectedChar;
-	std::string inputChars;
-};
+	std::wstring inputChars;
+	OskKeyboardDisplay currentKeyboard;
+	OskKeyboardLanguage currentKeyboardLanguage;
+	bool isCombinated;
 
+	int i_level; // for Korean Keyboard support
+	int i_value[3]; // for Korean Keyboard support
+};

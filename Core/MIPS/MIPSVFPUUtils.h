@@ -38,17 +38,17 @@ inline int Xpose(int v)
 
 enum VectorSize
 {
-  V_Single,
-  V_Pair,
-  V_Triple,
-  V_Quad,
+	V_Single,
+	V_Pair,
+	V_Triple,
+	V_Quad,
 };
 
 enum MatrixSize
 {
-  M_2x2,
-  M_3x3,
-  M_4x4,
+	M_2x2,
+	M_3x3,
+	M_4x4,
 };
 
 void ReadMatrix(float *rd, MatrixSize size, int reg);
@@ -57,8 +57,16 @@ void WriteMatrix(const float *rs, MatrixSize size, int reg);
 void WriteVector(const float *rs, VectorSize N, int reg);
 void ReadVector(float *rd, VectorSize N, int reg);
 
-VectorSize GetVecSize(u32 op);
-MatrixSize GetMtxSize(u32 op);
+void GetVectorRegs(u8 regs[4], VectorSize N, int vectorReg);
+void GetMatrixRegs(u8 regs[16], MatrixSize N, int matrixReg);
+
+// Returns a number from 0-7, good for checking overlap for 4x4 matrices.
+inline int GetMtx(int matrixReg) {
+	return (matrixReg >> 2) & 7;
+}
+
+VectorSize GetVecSize(MIPSOpcode op);
+MatrixSize GetMtxSize(MIPSOpcode op);
 VectorSize GetHalfVectorSize(VectorSize sz);
 int GetNumVectorElements(VectorSize sz);
 int GetMatrixSide(MatrixSize sz);

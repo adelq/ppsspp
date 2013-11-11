@@ -21,31 +21,25 @@
 #include "../ge_constants.h"
 #include "../../Core/MemMap.h"
 #include "../../Core/HLE/sceKernelInterrupt.h"
+#include "../../Core/HLE/sceGe.h"
 
-NullGPU::NullGPU()
-{
-	interruptsEnabled_ = true;
-}
+NullGPU::NullGPU() { }
+NullGPU::~NullGPU() { }
 
-NullGPU::~NullGPU()
-{
-}
+void NullGPU::FastRunLoop(DisplayList &list) {
+	for (; downcount > 0; --downcount) {
+		u32 op = Memory::ReadUnchecked_U32(list.pc);
+		u32 cmd = op >> 24;
 
-void NullGPU::DrawSync(int mode)
-{
-	if (mode == 0)  // Wait for completion
-	{
-		__RunOnePendingInterrupt();
+		u32 diff = op ^ gstate.cmdmem[cmd];
+		gstate.cmdmem[cmd] = op;
+		ExecuteOp(op, diff);
+
+		list.pc += 4;
 	}
 }
 
-void NullGPU::Continue()
-{
-
-}
-
-void NullGPU::ExecuteOp(u32 op, u32 diff)
-{
+void NullGPU::ExecuteOp(u32 op, u32 diff) {
 	u32 cmd = op >> 24;
 	u32 data = op & 0xFFFFFF;
 
@@ -56,14 +50,12 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 		DEBUG_LOG(G3D,"DL BASE: %06x", data);
 		break;
 
-	case GE_CMD_VADDR:		/// <<8????
-		gstate_c.vertexAddr = ((gstate.base & 0x00FF0000) << 8)|data;
-		DEBUG_LOG(G3D,"DL VADDR: %06x", gstate_c.vertexAddr);
+	case GE_CMD_VADDR:
+		gstate_c.vertexAddr = gstate_c.getRelativeAddress(data);
 		break;
 
 	case GE_CMD_IADDR:
-		gstate_c.indexAddr	= ((gstate.base & 0x00FF0000) << 8)|data;
-		DEBUG_LOG(G3D,"DL IADDR: %06x", gstate_c.indexAddr);
+		gstate_c.indexAddr	= gstate_c.getRelativeAddress(data);
 		break;
 
 	case GE_CMD_PRIM:
@@ -103,94 +95,16 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 		}
 		break;
 
-	case GE_CMD_JUMP: 
-		{
-			u32 target = (((gstate.base & 0x00FF0000) << 8) | (op & 0xFFFFFC)) & 0x0FFFFFFF;
-			DEBUG_LOG(G3D,"DL CMD JUMP - %08x to %08x", currentList->pc, target);
-			currentList->pc = target - 4; // pc will be increased after we return, counteract that
-		}
-		break;
-
-	case GE_CMD_CALL: 
-		{
-			u32 retval = currentList->pc + 4;
-			stack[stackptr++] = retval; 
-			u32 target = (((gstate.base & 0x00FF0000) << 8) | (op & 0xFFFFFC)) & 0xFFFFFFF;
-			DEBUG_LOG(G3D,"DL CMD CALL - %08x to %08x, ret=%08x", currentList->pc, target, retval);
-			currentList->pc = target - 4;	// pc will be increased after we return, counteract that
-		}
-		break;
-
-	case GE_CMD_RET: 
-		//TODO : debug!
-		{
-			u32 target = stack[--stackptr] & 0xFFFFFFF; 
-			DEBUG_LOG(G3D,"DL CMD RET - from %08x to %08x", currentList->pc, target);
-			currentList->pc = target - 4;
-		}
-		break;
-
-	case GE_CMD_SIGNAL:
-		{
-			ERROR_LOG(G3D, "DL GE_CMD_SIGNAL %08x", data & 0xFFFFFF);
-			int behaviour = (data >> 16) & 0xFF;
-			int signal = data & 0xFFFF;
-
-			// TODO: Should this run while interrupts are suspended?
-			if (interruptsEnabled_)
-				__TriggerInterruptWithArg(PSP_INTR_HLE, PSP_GE_INTR, currentList->subIntrBase | PSP_GE_SUBINTR_SIGNAL, signal);
-		}
-		break;
-
-	case GE_CMD_BJUMP:
-		// bounding box jump. Let's just not jump, for now.
-		DEBUG_LOG(G3D,"DL BBOX JUMP - unimplemented");
-		break;
-
 	case GE_CMD_BOUNDINGBOX:
-		// bounding box test. Let's do nothing.
-		DEBUG_LOG(G3D,"DL BBOX TEST - unimplemented");
-		break;
-
-	case GE_CMD_ORIGIN:
-		gstate.offsetAddr = currentList->pc & 0xFFFFFF;
+		if (data != 0)
+			DEBUG_LOG(G3D, "Unsupported bounding box: %06x", data);
+		// bounding box test. Let's assume the box was within the drawing region.
+		currentList->bboxResult = true;
 		break;
 
 	case GE_CMD_VERTEXTYPE:
 		DEBUG_LOG(G3D,"DL SetVertexType: %06x", data);
 		// This sets through-mode or not, as well.
-		break;
-
-	case GE_CMD_OFFSETADDR:
-		//			offsetAddr = data<<8;
-		break;
-
-
-	case GE_CMD_FINISH:
-		DEBUG_LOG(G3D,"DL CMD FINISH");
-		// TODO: Should this run while interrupts are suspended?
-		if (interruptsEnabled_)
-			__TriggerInterruptWithArg(PSP_INTR_HLE, PSP_GE_INTR, currentList->subIntrBase | PSP_GE_SUBINTR_FINISH, 0);
-		break;
-
-	case GE_CMD_END: 
-		DEBUG_LOG(G3D,"DL CMD END");
-		{
-			switch (prev >> 24)
-			{
-			case GE_CMD_FINISH:
-				finished = true;
-				break;
-			default:
-				DEBUG_LOG(G3D,"Ah, not finished: %06x", prev & 0xFFFFFF);
-				break;
-			}
-		}
-			
-		// This should generate a Reading Ended interrupt
-		// if (interruptsEnabled_)
-		// __TriggerInterrupt(PSP_GE_INTR);
-
 		break;
 
 	case GE_CMD_REGION1:
@@ -246,23 +160,23 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 		break;
 
 	case GE_CMD_TEXSCALEU: 
-		gstate_c.uScale = getFloat24(data); 
-		DEBUG_LOG(G3D, "DL Texture U Scale: %f", gstate_c.uScale);
+		gstate_c.uv.uScale = getFloat24(data); 
+		DEBUG_LOG(G3D, "DL Texture U Scale: %f", gstate_c.uv.uScale);
 		break;
 
 	case GE_CMD_TEXSCALEV: 
-		gstate_c.vScale = getFloat24(data); 
-		DEBUG_LOG(G3D, "DL Texture V Scale: %f", gstate_c.vScale);
+		gstate_c.uv.vScale = getFloat24(data); 
+		DEBUG_LOG(G3D, "DL Texture V Scale: %f", gstate_c.uv.vScale);
 		break;
 
 	case GE_CMD_TEXOFFSETU: 
-		gstate_c.uOff = getFloat24(data);	
-		DEBUG_LOG(G3D, "DL Texture U Offset: %f", gstate_c.uOff);
+		gstate_c.uv.uOff = getFloat24(data);	
+		DEBUG_LOG(G3D, "DL Texture U Offset: %f", gstate_c.uv.uOff);
 		break;
 
 	case GE_CMD_TEXOFFSETV: 
-		gstate_c.vOff = getFloat24(data);	
-		DEBUG_LOG(G3D, "DL Texture V Offset: %f", gstate_c.vOff);
+		gstate_c.uv.vOff = getFloat24(data);	
+		DEBUG_LOG(G3D, "DL Texture V Offset: %f", gstate_c.uv.vOff);
 		break;
 
 	case GE_CMD_SCISSOR1:
@@ -289,17 +203,11 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 		break;
 
 	case GE_CMD_FRAMEBUFPTR:
-		{
-			u32 ptr = op & 0xFFE000;
-			DEBUG_LOG(G3D, "DL FramebufPtr: %08x", ptr);
-		}
+		DEBUG_LOG(G3D, "DL FramebufPtr: %08x", data);
 		break;
 
 	case GE_CMD_FRAMEBUFWIDTH:
-		{
-			u32 w = data & 0xFFFFFF;
-			DEBUG_LOG(G3D, "DL FramebufWidth: %i", w);
-		}
+		DEBUG_LOG(G3D, "DL FramebufWidth: %i", data);
 		break;
 
 	case GE_CMD_FRAMEBUFPIXFORMAT:
@@ -326,7 +234,7 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 	case GE_CMD_TEXBUFWIDTH5:
 	case GE_CMD_TEXBUFWIDTH6:
 	case GE_CMD_TEXBUFWIDTH7:
-		DEBUG_LOG(G3D,"DL Texture BUFWIDTHess %i: %06x", cmd-GE_CMD_TEXBUFWIDTH0, data);
+		DEBUG_LOG(G3D,"DL Texture BUFWIDTH %i: %06x", cmd-GE_CMD_TEXBUFWIDTH0, data);
 		break;
 
 	case GE_CMD_CLUTADDR:
@@ -340,7 +248,7 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 	case GE_CMD_LOADCLUT:
 		// This could be used to "dirty" textures with clut.
 		{
-			u32 clutAddr = ((gstate.clutaddrupper & 0xFF0000)<<8) | (gstate.clutaddr & 0xFFFFFF);
+			u32 clutAddr = gstate.getClutAddress();
 			if (clutAddr)
 			{
 				DEBUG_LOG(G3D,"DL Clut load: %08x", clutAddr);
@@ -357,8 +265,8 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 
 	case GE_CMD_TRANSFERSRCW:
 		{
-			u32 xferSrc = gstate.transfersrc | ((data&0xFF0000)<<8);
-			u32 xferSrcW = gstate.transfersrcw & 1023;
+			u32 xferSrc = (gstate.transfersrc & 0x00FFFFFF) | ((data & 0xFF0000) << 8);
+			u32 xferSrcW = data & 0x3FF;
 			DEBUG_LOG(G3D,"Block Transfer Src: %08x	W: %i", xferSrc, xferSrcW);
 			break;
 		}
@@ -366,8 +274,8 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 
 	case GE_CMD_TRANSFERDSTW:
 		{
-			u32 xferDst= gstate.transferdst | ((data&0xFF0000)<<8);
-			u32 xferDstW = gstate.transferdstw & 1023;
+			u32 xferDst = (gstate.transferdst & 0x00FFFFFF) | ((data & 0xFF0000) << 8);
+			u32 xferDstW = data & 0x3FF;
 			DEBUG_LOG(G3D,"Block Transfer Dest: %08x	W: %i", xferDst, xferDstW);
 			break;
 		}
@@ -421,17 +329,11 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 		break;
 
 	case GE_CMD_ZBUFPTR:
-		{
-			u32 ptr = op & 0xFFE000;
-			DEBUG_LOG(G3D,"Zbuf Ptr: %06x", ptr);
-		}
+		DEBUG_LOG(G3D,"Zbuf Ptr: %06x", data);
 		break;
 
 	case GE_CMD_ZBUFWIDTH:
-		{
-			u32 w = data & 0xFFFFFF;
-			DEBUG_LOG(G3D,"Zbuf Width: %i", w);
-		}
+		DEBUG_LOG(G3D,"Zbuf Width: %i", data);
 		break;
 
 	case GE_CMD_AMBIENTCOLOR:
@@ -550,7 +452,7 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 		DEBUG_LOG(G3D,"DL cull: %06x", data);
 		break;
 
-	case GE_CMD_LMODE:
+	case GE_CMD_LIGHTMODE:
 		DEBUG_LOG(G3D,"DL Shade mode: %06x", data);
 		break;
 
@@ -676,77 +578,91 @@ void NullGPU::ExecuteOp(u32 op, u32 diff)
 		break;
 
 	case GE_CMD_WORLDMATRIXNUMBER:
-		DEBUG_LOG(G3D,"DL World matrix # %i", data);
 		gstate.worldmtxnum = data&0xF;
 		break;
 
 	case GE_CMD_WORLDMATRIXDATA:
-		DEBUG_LOG(G3D,"DL World matrix data # %f", getFloat24(data));
-		gstate.worldMatrix[gstate.worldmtxnum++] = getFloat24(data);
+		{
+			int num = gstate.worldmtxnum & 0xF;
+			if (num < 12) {
+				gstate.worldMatrix[num] = getFloat24(data);
+			}
+			gstate.worldmtxnum = (++num) & 0xF;
+		}
 		break;
 
 	case GE_CMD_VIEWMATRIXNUMBER:
-		DEBUG_LOG(G3D,"DL VIEW matrix # %i", data);
 		gstate.viewmtxnum = data&0xF;
 		break;
 
 	case GE_CMD_VIEWMATRIXDATA:
-		DEBUG_LOG(G3D,"DL VIEW matrix data # %f", getFloat24(data));
-		gstate.viewMatrix[gstate.viewmtxnum++] = getFloat24(data);
+		{
+			int num = gstate.viewmtxnum & 0xF;
+			if (num < 12) {
+				gstate.viewMatrix[num] = getFloat24(data);
+			}
+			gstate.viewmtxnum = (++num) & 0xF;
+		}
 		break;
 
 	case GE_CMD_PROJMATRIXNUMBER:
-		DEBUG_LOG(G3D,"DL PROJECTION matrix # %i", data);
 		gstate.projmtxnum = data&0xF;
 		break;
 
 	case GE_CMD_PROJMATRIXDATA:
-		DEBUG_LOG(G3D,"DL PROJECTION matrix data # %f", getFloat24(data));
-		gstate.projMatrix[gstate.projmtxnum++] = getFloat24(data);
+		{
+			int num = gstate.projmtxnum & 0xF;
+			gstate.projMatrix[num] = getFloat24(data);
+			gstate.projmtxnum = (++num) & 0xF;
+		}
 		break;
 
 	case GE_CMD_TGENMATRIXNUMBER:
-		DEBUG_LOG(G3D,"DL TGEN matrix # %i", data);
 		gstate.texmtxnum = data&0xF;
 		break;
 
 	case GE_CMD_TGENMATRIXDATA:
-		DEBUG_LOG(G3D,"DL TGEN matrix data # %f", getFloat24(data));
-		gstate.tgenMatrix[gstate.texmtxnum++] = getFloat24(data);
+		{
+			int num = gstate.texmtxnum & 0xF;
+			if (num < 12) {
+				gstate.tgenMatrix[num] = getFloat24(data);
+			}
+			gstate.texmtxnum = (++num) & 0xF;
+		}
 		break;
 
 	case GE_CMD_BONEMATRIXNUMBER:
-		DEBUG_LOG(G3D,"DL BONE matrix #%i", data);
-		gstate.boneMatrixNumber = data;
+		gstate.boneMatrixNumber = data & 0x7F;
 		break;
 
 	case GE_CMD_BONEMATRIXDATA:
-		DEBUG_LOG(G3D,"DL BONE matrix data #%i %f", gstate.boneMatrixNumber, getFloat24(data));
-		gstate.boneMatrix[gstate.boneMatrixNumber++] = getFloat24(data);
+		{
+			int num = gstate.boneMatrixNumber & 0x7F;
+			if (num < 96) {
+				gstate.boneMatrix[num] = getFloat24(data);
+			}
+			gstate.boneMatrixNumber = (++num) & 0x7F;
+		}
 		break;
 
 	default:
-		DEBUG_LOG(G3D,"DL Unknown: %08x @ %08x", op, currentList->pc);
+		GPUCommon::ExecuteOp(op, diff);
 		break;
-
-		//ETC...
 	}
 }
 
-void NullGPU::UpdateStats()
-{
+void NullGPU::UpdateStats() {
 	gpuStats.numVertexShaders = 0;
 	gpuStats.numFragmentShaders = 0;
 	gpuStats.numShaders = 0;
 	gpuStats.numTextures = 0;
 }
 
-void NullGPU::InvalidateCache(u32 addr, int size)
-{
+void NullGPU::InvalidateCache(u32 addr, int size, GPUInvalidationType type) {
 	// Nothing to invalidate.
 }
 
-void NullGPU::InvalidateCacheHint(u32 addr, int size)
-{
-	// Nothing to invalidate.
+void NullGPU::UpdateMemory(u32 dest, u32 src, int size) {
+	// Nothing to update.
+	InvalidateCache(dest, size, GPU_INVALIDATE_HINT);
 }

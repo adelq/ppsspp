@@ -35,25 +35,32 @@ void __KernelMemoryShutdown();
 KernelObject *__KernelMemoryFPLObject();
 KernelObject *__KernelMemoryVPLObject();
 KernelObject *__KernelMemoryPMBObject();
+KernelObject *__KernelTlsObject();
 
-void sceKernelCreateVpl();
-void sceKernelDeleteVpl();
-void sceKernelAllocateVpl();
-void sceKernelAllocateVplCB();
-void sceKernelTryAllocateVpl();
-void sceKernelFreeVpl();
-void sceKernelCancelVpl();
-void sceKernelReferVplStatus();
+SceUID sceKernelCreateVpl(const char *name, int partition, u32 attr, u32 vplSize, u32 optPtr);
+int sceKernelDeleteVpl(SceUID uid);
+int sceKernelAllocateVpl(SceUID uid, u32 size, u32 addrPtr, u32 timeoutPtr);
+int sceKernelAllocateVplCB(SceUID uid, u32 size, u32 addrPtr, u32 timeoutPtr);
+int sceKernelTryAllocateVpl(SceUID uid, u32 size, u32 addrPtr);
+int sceKernelFreeVpl(SceUID uid, u32 addr);
+int sceKernelCancelVpl(SceUID uid, u32 numWaitThreadsPtr);
+int sceKernelReferVplStatus(SceUID uid, u32 infoPtr);
 
-void sceKernelCreateFpl();
-void sceKernelDeleteFpl();
-void sceKernelAllocateFpl();
-void sceKernelAllocateFplCB();
-void sceKernelTryAllocateFpl();
-void sceKernelFreeFpl();
-void sceKernelCancelFpl();
-void sceKernelReferFplStatus();
+int sceKernelCreateFpl(const char *name, u32 mpid, u32 attr, u32 blocksize, u32 numBlocks, u32 optPtr);
+int sceKernelDeleteFpl(SceUID uid);
+int sceKernelAllocateFpl(SceUID uid, u32 blockPtrAddr, u32 timeoutPtr);
+int sceKernelAllocateFplCB(SceUID uid, u32 blockPtrAddr, u32 timeoutPtr);
+int sceKernelTryAllocateFpl(SceUID uid, u32 blockPtrAddr);
+int sceKernelFreeFpl(SceUID uid, u32 blockPtr);
+int sceKernelCancelFpl(SceUID uid, u32 numWaitThreadsPtr);
+int sceKernelReferFplStatus(SceUID uid, u32 statusPtr);
 
 int sceKernelGetCompiledSdkVersion();
+
+SceUID sceKernelCreateTls(const char *name, u32 partitionid, u32 attr, u32 size, u32 count, u32 optionsPtr);
+int sceKernelDeleteTls(SceUID uid);
+int sceKernelAllocateTls(SceUID uid);
+int sceKernelFreeTls(SceUID uid);
+int sceKernelReferTlsStatus(SceUID uid, u32 infoPtr);
 
 void Register_SysMemUserForUser();

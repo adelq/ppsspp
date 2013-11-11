@@ -22,20 +22,17 @@
 #include <cstdio>
 #include <string>
 #include <vector>
-#include <string.h>
+#include <time.h>
 
 #include "Common.h"
 
-// User directory indices for GetUserPath
-enum {
-  D_USER_IDX,
-	D_SCREENSHOTS_IDX,
-  D_LOGS_IDX,
-	D_CONFIG_IDX,
-  F_CONFIG_IDX,
-	F_MAINLOG_IDX,
-	NUM_PATH_INDICES
-};
+#ifdef _WIN32
+inline struct tm* localtime_r(const time_t *clock, struct tm *result) {
+	if (localtime_s(result, clock) == 0)
+		return result;
+	return NULL;
+}
+#endif
 
 namespace File
 {
@@ -49,6 +46,9 @@ struct FSTEntry
 	std::string virtualName;		// name in FST names table
 	std::vector<FSTEntry> children;
 };
+
+// Mostly to handle utf-8 filenames better on Windows.
+FILE *OpenCFile(const std::string &filename, const char *mode);
 
 // Returns true if file filename exists
 bool Exists(const std::string &filename);
@@ -90,10 +90,6 @@ bool Copy(const std::string &srcFilename, const std::string &destFilename);
 // creates an empty file filename, returns true on success 
 bool CreateEmptyFile(const std::string &filename);
 
-// Scans the directory tree gets, starting from _Directory and adds the
-// results into parentEntry. Returns the number of files+directories found
-u32 ScanDirectoryTree(const std::string &directory, FSTEntry& parentEntry);
-
 // deletes the given directory and anything under it. Returns true on success.
 bool DeleteDirRecursively(const std::string &directory);
 
@@ -106,23 +102,9 @@ void CopyDir(const std::string &source_path, const std::string &dest_path);
 // Set the current directory to given directory
 bool SetCurrentDir(const std::string &directory);
 
-// Returns a pointer to a string with a Dolphin data dir in the user's home
-// directory. To be used in "multi-user" mode (that is, installed).
-std::string &GetUserPath(const unsigned int DirIDX, const std::string &newPath="");
-
-// Returns the path to where the sys file are
-std::string GetSysDirectory();
-
-#ifdef __APPLE__
-std::string GetBundleDirectory();
-#endif
-
 #ifdef _WIN32
-std::string &GetExeDirectory();
+std::wstring &GetExeDirectory();
 #endif
-
-bool WriteStringToFile(bool text_file, const std::string &str, const char *filename);
-bool ReadFileToString(bool text_file, const char *filename, std::string &str);
 
 // simple wrapper for cstdlib file functions to
 // hopefully will make error checking easier

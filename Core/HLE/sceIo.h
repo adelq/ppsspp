@@ -19,14 +19,19 @@
 
 #include <string>
 
-#include "../System.h"
-#include "HLE.h"
-#include "sceKernel.h"
+#include "Core/System.h"
+#include "Core/HLE/HLE.h"
+#include "Core/HLE/sceKernel.h"
 
 void __IoInit();
 void __IoDoState(PointerWrap &p);
 void __IoShutdown();
+
+struct ScePspDateTime;
+
 u32 __IoGetFileHandleFromId(u32 id, u32 &outError);
+void __IoCopyDate(ScePspDateTime& date_out, const tm& date_in);
+
 KernelObject *__KernelFileNodeObject();
 KernelObject *__KernelDirListingObject();
 

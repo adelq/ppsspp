@@ -49,6 +49,12 @@
     <Filter Include="Ext\Snappy">
       <UniqueIdentifier>{0b77054f-7fc7-4c33-ada3-762aecde69e5}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Font">
+      <UniqueIdentifier>{1c79e88d-1c48-450b-8af6-f22ce7d40c66}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="MIPS\PPC">
+      <UniqueIdentifier>{ac0e396a-6e16-4796-a0a0-b8ebf46ea74c}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ELF\ElfReader.cpp">
@@ -100,9 +106,6 @@
       <Filter>MIPS\x86</Filter>
     </ClCompile>
     <ClCompile Include="MIPS\x86\Asm.cpp">
-      <Filter>MIPS\x86</Filter>
-    </ClCompile>
-    <ClCompile Include="MIPS\x86\JitCache.cpp">
       <Filter>MIPS\x86</Filter>
     </ClCompile>
     <ClCompile Include="MIPS\x86\RegCache.cpp">
@@ -165,6 +168,9 @@
     <ClCompile Include="HLE\sceAudio.cpp">
       <Filter>HLE\Libraries</Filter>
     </ClCompile>
+    <ClCompile Include="HLE\sceCcc.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
     <ClCompile Include="HLE\sceCtrl.cpp">
       <Filter>HLE\Libraries</Filter>
     </ClCompile>
@@ -186,7 +192,22 @@
     <ClCompile Include="HLE\sceIo.cpp">
       <Filter>HLE\Libraries</Filter>
     </ClCompile>
+    <ClCompile Include="HLE\sceJpeg.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
     <ClCompile Include="HLE\sceMpeg.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceMd5.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceMp4.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceP3da.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceGameUpdate.cpp">
       <Filter>HLE\Libraries</Filter>
     </ClCompile>
     <ClCompile Include="HLE\sceNet.cpp">
@@ -357,9 +378,6 @@
     <ClCompile Include="MIPS\ARM\ArmJit.cpp">
       <Filter>MIPS\ARM</Filter>
     </ClCompile>
-    <ClCompile Include="MIPS\ARM\ArmJitCache.cpp">
-      <Filter>MIPS\ARM</Filter>
-    </ClCompile>
     <ClCompile Include="MIPS\ARM\ArmRegCache.cpp">
       <Filter>MIPS\ARM</Filter>
     </ClCompile>
@@ -368,6 +386,115 @@
     </ClCompile>
     <ClCompile Include="..\ext\disarm.cpp">
       <Filter>Ext</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\x86\RegCacheFPU.cpp">
+      <Filter>MIPS\x86</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\ARM\ArmRegCacheFPU.cpp">
+      <Filter>MIPS\ARM</Filter>
+    </ClCompile>
+    <ClCompile Include="Font\PGF.cpp">
+      <Filter>Font</Filter>
+    </ClCompile>
+    <ClCompile Include="..\git-version.cpp" />
+    <ClCompile Include="Reporting.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\scePspNpDrm_user.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceChnnlsv.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceDeflt.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="ELF\PBPReader.cpp">
+      <Filter>ELF</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\scePauth.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceNp.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="FileSystems\tlzrc.cpp">
+      <Filter>FileSystems</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceMp3.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\JitCommon\JitBlockCache.cpp">
+      <Filter>MIPS\JitCommon</Filter>
+    </ClCompile>
+    <ClCompile Include="Cwcheat.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="HW\SimpleAT3Dec.cpp">
+      <Filter>HW</Filter>
+    </ClCompile>
+    <ClCompile Include="HW\MpegDemux.cpp">
+      <Filter>HW</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceAudiocodec.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HDRemaster.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\MIPSAsmTables.cpp">
+      <Filter>MIPS</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\MIPSAsm.cpp">
+      <Filter>MIPS</Filter>
+    </ClCompile>
+    <ClCompile Include="FileSystems\VirtualDiscFileSystem.cpp">
+      <Filter>FileSystems</Filter>
+    </ClCompile>
+    <ClCompile Include="HW\AsyncIOManager.cpp">
+      <Filter>HW</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\MIPSStackWalk.cpp">
+      <Filter>MIPS</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\xxhash.c">
+      <Filter>Ext</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\PPC\PpcCompLoadStore.cpp">
+      <Filter>MIPS\PPC</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\PPC\PpcCompVFPU.cpp">
+      <Filter>MIPS\PPC</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\PPC\PpcJit.cpp">
+      <Filter>MIPS\PPC</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\PPC\PpcRegCache.cpp">
+      <Filter>MIPS\PPC</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\PPC\PpcCompAlu.cpp">
+      <Filter>MIPS\PPC</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\PPC\PpcCompBranch.cpp">
+      <Filter>MIPS\PPC</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\PPC\PpcCompFpu.cpp">
+      <Filter>MIPS\PPC</Filter>
+    </ClCompile>
+    <ClCompile Include="MIPS\PPC\PpcAsm.cpp">
+      <Filter>MIPS\PPC</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceHeap.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="HLE\sceNetAdhoc.cpp">
+      <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="Dialog\PSPGamedataInstallDialog.cpp">
+      <Filter>Dialog</Filter>
+    </ClCompile>
+    <ClCompile Include="Dialog\PSPNetconfDialog.cpp">
+      <Filter>Dialog</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -411,9 +538,6 @@
       <Filter>MIPS\x86</Filter>
     </ClInclude>
     <ClInclude Include="MIPS\x86\Asm.h">
-      <Filter>MIPS\x86</Filter>
-    </ClInclude>
-    <ClInclude Include="MIPS\x86\JitCache.h">
       <Filter>MIPS\x86</Filter>
     </ClInclude>
     <ClInclude Include="MIPS\x86\RegCache.h">
@@ -479,6 +603,9 @@
     <ClInclude Include="HLE\sceAudio.h">
       <Filter>HLE\Libraries</Filter>
     </ClInclude>
+    <ClInclude Include="HLE\sceCcc.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
     <ClInclude Include="HLE\sceCtrl.h">
       <Filter>HLE\Libraries</Filter>
     </ClInclude>
@@ -500,7 +627,22 @@
     <ClInclude Include="HLE\sceIo.h">
       <Filter>HLE\Libraries</Filter>
     </ClInclude>
+    <ClInclude Include="HLE\sceJpeg.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
     <ClInclude Include="HLE\sceMpeg.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceMd5.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceMp4.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceP3da.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceGameUpdate.h">
       <Filter>HLE\Libraries</Filter>
     </ClInclude>
     <ClInclude Include="HLE\sceNet.h">
@@ -525,9 +667,6 @@
       <Filter>HLE\Libraries</Filter>
     </ClInclude>
     <ClInclude Include="Util\BlockAllocator.h">
-      <Filter>Util</Filter>
-    </ClInclude>
-    <ClInclude Include="Util\Pool.h">
       <Filter>Util</Filter>
     </ClInclude>
     <ClInclude Include="Debugger\Breakpoints.h">
@@ -674,14 +813,107 @@
     <ClInclude Include="MIPS\ARM\ArmJit.h">
       <Filter>MIPS\ARM</Filter>
     </ClInclude>
-    <ClInclude Include="MIPS\ARM\ArmJitCache.h">
-      <Filter>MIPS\ARM</Filter>
-    </ClInclude>
     <ClInclude Include="MIPS\ARM\ArmRegCache.h">
       <Filter>MIPS\ARM</Filter>
     </ClInclude>
-    <ClInclude Include="..\Ext\disarm.h">
+    <ClInclude Include="MIPS\x86\RegCacheFPU.h">
+      <Filter>MIPS\x86</Filter>
+    </ClInclude>
+    <ClInclude Include="MIPS\ARM\ArmRegCacheFPU.h">
+      <Filter>MIPS\ARM</Filter>
+    </ClInclude>
+    <ClInclude Include="Font\PGF.h">
+      <Filter>Font</Filter>
+    </ClInclude>
+    <ClInclude Include="Reporting.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\scePspNpDrm_user.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceChnnlsv.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceDeflt.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="ELF\PBPReader.h">
+      <Filter>ELF</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\scePauth.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceNp.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceMp3.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="MIPS\JitCommon\JitBlockCache.h">
+      <Filter>MIPS\JitCommon</Filter>
+    </ClInclude>
+    <ClInclude Include="Cwcheat.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="HW\SimpleAT3Dec.h">
+      <Filter>HW</Filter>
+    </ClInclude>
+    <ClInclude Include="HW\MpegDemux.h">
+      <Filter>HW</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceAudiocodec.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HDRemaster.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="MIPS\MIPSAsmTables.h">
+      <Filter>MIPS</Filter>
+    </ClInclude>
+    <ClInclude Include="MIPS\MIPSAsm.h">
+      <Filter>MIPS</Filter>
+    </ClInclude>
+    <ClInclude Include="FileSystems\VirtualDiscFileSystem.h">
+      <Filter>FileSystems</Filter>
+    </ClInclude>
+    <ClInclude Include="ThreadEventQueue.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="HW\AsyncIOManager.h">
+      <Filter>HW</Filter>
+    </ClInclude>
+    <ClInclude Include="MIPS\MIPSStackWalk.h">
+      <Filter>MIPS</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\disarm.h">
       <Filter>Ext</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\xxhash.h">
+      <Filter>Ext</Filter>
+    </ClInclude>
+    <ClInclude Include="MIPS\PPC\PpcJit.h">
+      <Filter>MIPS\PPC</Filter>
+    </ClInclude>
+    <ClInclude Include="MIPS\PPC\PpcRegCache.h">
+      <Filter>MIPS\PPC</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\KernelWaitHelpers.h">
+      <Filter>HLE\Kernel</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceHeap.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="HLE\sceNetAdhoc.h">
+      <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="Dialog\PSPGamedataInstallDialog.h">
+      <Filter>Dialog</Filter>
+    </ClInclude>
+    <ClInclude Include="Dialog\PSPNetconfDialog.h">
+      <Filter>Dialog</Filter>
+    </ClInclude>
+    <ClInclude Include="MIPS\JitCommon\JitState.h">
+      <Filter>MIPS\JitCommon</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

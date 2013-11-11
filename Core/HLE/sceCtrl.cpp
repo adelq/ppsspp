@@ -15,29 +15,31 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include "HLE.h"
-#include "../MIPS/MIPS.h"
-#include "../CoreTiming.h"
-#include "StdMutex.h"
-#include "sceCtrl.h"
-#include "sceDisplay.h"
-#include "sceKernel.h"
-#include "sceKernelThread.h"
+#include <math.h>
+#include "Core/HLE/HLE.h"
+#include "Core/MIPS/MIPS.h"
+#include "Core/CoreTiming.h"
+#include "Common/ChunkFile.h"
+#include "Common/StdMutex.h"
+#include "Core/HLE/sceCtrl.h"
+#include "Core/HLE/sceDisplay.h"
+#include "Core/HLE/sceKernel.h"
+#include "Core/HLE/sceKernelThread.h"
+#include "Core/HLE/sceKernelInterrupt.h"
 
 /* Index for the two analog directions */
 #define CTRL_ANALOG_X   0
 #define CTRL_ANALOG_Y   1
+#define CTRL_ANALOG_CENTER 128
 
 #define CTRL_MODE_DIGITAL   0
 #define CTRL_MODE_ANALOG    1
 
-const int PSP_CTRL_ERROR_INVALID_MODE = 0x80000107;
 const int PSP_CTRL_ERROR_INVALID_IDLE_PTR = 0x80000023;
 
-const int NUM_CTRL_BUFFERS = 64;
+const u32 NUM_CTRL_BUFFERS = 64;
 
-enum
-{
+enum {
 	CTRL_WAIT_POSITIVE = 1,
 	CTRL_WAIT_NEGATIVE = 2,
 };
@@ -45,17 +47,19 @@ enum
 // Returned control data
 struct _ctrl_data
 {
-	u32 frame;
-	u32 buttons;
-	u8  analog[2];
-	u8  unused[6];
+	u32_le frame;
+	u32_le buttons;
+	// The PSP has only one stick, but has space for more info.
+	// The second stick is populated for HD remasters and possibly in the PSP emulator on PS3/Vita.
+	u8 analog[2][2];
+	u8 unused[4];
 };
 
 struct CtrlLatch {
-	u32 btnMake;
-	u32 btnBreak;
-	u32 btnPress;
-	u32 btnRelease;
+	u32_le btnMake;
+	u32_le btnBreak;
+	u32_le btnPress;
+	u32_le btnRelease;
 };
 
 
@@ -67,9 +71,10 @@ static u32 ctrlOldButtons = 0;
 
 static _ctrl_data ctrlBufs[NUM_CTRL_BUFFERS];
 static _ctrl_data ctrlCurrent;
-static int ctrlBuf = 0;
-static int ctrlBufRead = 0;
+static u32 ctrlBuf = 0;
+static u32 ctrlBufRead = 0;
 static CtrlLatch latch;
+static u32 dialogBtnMake = 0;
 
 static int ctrlIdleReset = -1;
 static int ctrlIdleBack = -1;
@@ -84,29 +89,40 @@ static int ctrlTimer = -1;
 // STATE END
 //////////////////////////////////////////////////////////////////////////
 
+// Not savestated, this is emu state.
+// Not related to sceCtrl*RapidFire(), although it may do the same thing.
+static bool emuRapidFire = false;
+static u32 emuRapidFireFrames = 0;
+
+// These buttons are not affected by rapid fire (neither is analog.)
+const u32 CTRL_EMU_RAPIDFIRE_MASK = CTRL_UP | CTRL_DOWN | CTRL_LEFT | CTRL_RIGHT;
 
 void __CtrlUpdateLatch()
 {
 	std::lock_guard<std::recursive_mutex> guard(ctrlMutex);
+	
+	// Copy in the current data to the current buffer.
+	ctrlBufs[ctrlBuf] = ctrlCurrent;
+	u32 buttons = ctrlCurrent.buttons;
+	if (emuRapidFire && (emuRapidFireFrames % 10) < 5)
+	{
+		ctrlBufs[ctrlBuf].buttons &= CTRL_EMU_RAPIDFIRE_MASK;
+		buttons &= CTRL_EMU_RAPIDFIRE_MASK;
+	}
 
-	u32 changed = ctrlCurrent.buttons ^ ctrlOldButtons;
-	latch.btnMake |= ctrlCurrent.buttons & changed;
+	u32 changed = buttons ^ ctrlOldButtons;
+	latch.btnMake |= buttons & changed;
 	latch.btnBreak |= ctrlOldButtons & changed;
-	latch.btnPress |= ctrlCurrent.buttons;
-	latch.btnRelease |= (ctrlOldButtons & ~ctrlCurrent.buttons) & changed;
+	latch.btnPress |= buttons;
+	latch.btnRelease |= (ctrlOldButtons & ~buttons) & changed;
+	dialogBtnMake |= buttons & changed;
 	ctrlLatchBufs++;
 		
-	ctrlOldButtons = ctrlCurrent.buttons;
+	ctrlOldButtons = buttons;
 
-	// Copy in the current data to the current buffer.
-	memcpy(&ctrlBufs[ctrlBuf], &ctrlCurrent, sizeof(_ctrl_data));
-
-	ctrlBufs[ctrlBuf].frame = (u32) (CoreTiming::GetTicks() / CoreTiming::GetClockFrequencyMHz());
+	ctrlBufs[ctrlBuf].frame = (u32) CoreTiming::GetGlobalTimeUs();
 	if (!analogEnabled)
-	{
-		ctrlBufs[ctrlBuf].analog[0] = 128;
-		ctrlBufs[ctrlBuf].analog[1] = 128;
-	}
+		memset(ctrlBufs[ctrlBuf].analog, CTRL_ANALOG_CENTER, sizeof(ctrlBufs[ctrlBuf].analog));
 
 	ctrlBuf = (ctrlBuf + 1) % NUM_CTRL_BUFFERS;
 
@@ -131,10 +147,19 @@ u32 __CtrlPeekButtons()
 	return ctrlCurrent.buttons;
 }
 
+void __CtrlPeekAnalog(int stick, float *x, float *y)
+{
+	std::lock_guard<std::recursive_mutex> guard(ctrlMutex);
+
+	*x = (ctrlCurrent.analog[stick][CTRL_ANALOG_X] - 127.5f) / 127.5f;
+	*y = -(ctrlCurrent.analog[stick][CTRL_ANALOG_Y] - 127.5f) / 127.5f;
+}
+
+
 u32 __CtrlReadLatch()
 {
-	u32 ret = latch.btnMake;
-	__CtrlResetLatch();
+	u32 ret = dialogBtnMake;
+	dialogBtnMake = 0;
 	return ret;
 }
 
@@ -153,30 +178,35 @@ void __CtrlButtonUp(u32 buttonBit)
 	ctrlCurrent.buttons &= ~buttonBit;
 }
 
-void __CtrlSetAnalog(float x, float y)
+void __CtrlSetAnalogX(float x, int stick)
 {
 	std::lock_guard<std::recursive_mutex> guard(ctrlMutex);
-	// TODO: Circle!
-	if (x > 1.0f) x = 1.0f;
-	if (y > 1.0f) y = 1.0f;
-	if (x < -1.0f) x = -1.0f;
-	if (y < -1.0f) y = -1.0f;
-	ctrlCurrent.analog[0] = (u8)(x * 127.f + 128.f);
-	ctrlCurrent.analog[1] = (u8)(-y * 127.f + 128.f);
+	ctrlCurrent.analog[stick][CTRL_ANALOG_X] = (u8)ceilf(x * 127.5f + 127.5f);
+}
+
+void __CtrlSetAnalogY(float y, int stick)
+{
+	std::lock_guard<std::recursive_mutex> guard(ctrlMutex);
+	ctrlCurrent.analog[stick][CTRL_ANALOG_Y] = (u8)ceilf(-y * 127.5f + 127.5f);
+}
+
+void __CtrlSetRapidFire(bool state)
+{
+	emuRapidFire = state;
 }
 
 int __CtrlReadSingleBuffer(u32 ctrlDataPtr, bool negative)
 {
-	_ctrl_data data;
-	if (Memory::IsValidAddress(ctrlDataPtr))
+	PSPPointer<_ctrl_data> data;
+	data = ctrlDataPtr;
+	if (data.IsValid())
 	{
-		memcpy(&data, &ctrlBufs[ctrlBufRead], sizeof(_ctrl_data));
+		*data = ctrlBufs[ctrlBufRead];
 		ctrlBufRead = (ctrlBufRead + 1) % NUM_CTRL_BUFFERS;
 
 		if (negative)
-			data.buttons = ~data.buttons;
+			data->buttons = ~data->buttons;
 
-		Memory::WriteStruct(ctrlDataPtr, &data);
 		return 1;
 	}
 
@@ -188,7 +218,12 @@ int __CtrlReadBuffer(u32 ctrlDataPtr, u32 nBufs, bool negative, bool peek)
 	if (nBufs > NUM_CTRL_BUFFERS)
 		return SCE_KERNEL_ERROR_INVALID_SIZE;
 
-	int resetRead = ctrlBufRead;
+	if (!peek && !__KernelIsDispatchEnabled())
+		return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
+	if (!peek && __IsInInterrupt())
+		return SCE_KERNEL_ERROR_ILLEGAL_CONTEXT;
+
+	u32 resetRead = ctrlBufRead;
 
 	u32 availBufs;
 	// Peeks always work, they just go go from now X buffers.
@@ -241,6 +276,8 @@ retry:
 
 void __CtrlVblank()
 {
+	emuRapidFireFrames++;
+
 	// This always runs, so make sure we're in vblank mode.
 	if (ctrlCycle == 0)
 		__CtrlDoSample();
@@ -249,7 +286,7 @@ void __CtrlVblank()
 void __CtrlTimerUpdate(u64 userdata, int cyclesLate)
 {
 	// This only runs in timer mode (ctrlCycle > 0.)
-	_dbg_assert_msg_(HLE, ctrlCycle > 0, "Ctrl: sampling cycle should be > 0");
+	_dbg_assert_msg_(SCECTRL, ctrlCycle > 0, "Ctrl: sampling cycle should be > 0");
 
 	__CtrlDoSample();
 	CoreTiming::ScheduleEvent(usToCycles(ctrlCycle), ctrlTimer, 0);
@@ -270,22 +307,27 @@ void __CtrlInit()
 	ctrlBufRead = 0;
 	ctrlOldButtons = 0;
 	ctrlLatchBufs = 0;
+	dialogBtnMake = 0;
 
 	memset(&latch, 0, sizeof(latch));
 	// Start with everything released.
 	latch.btnRelease = 0xffffffff;
 
 	memset(&ctrlCurrent, 0, sizeof(ctrlCurrent));
-	ctrlCurrent.analog[0] = 128;
-	ctrlCurrent.analog[1] = 128;
+	memset(ctrlCurrent.analog, CTRL_ANALOG_CENTER, sizeof(ctrlCurrent.analog));
+	analogEnabled = false;
 
-	for (int i = 0; i < NUM_CTRL_BUFFERS; i++)
+	for (u32 i = 0; i < NUM_CTRL_BUFFERS; i++)
 		memcpy(&ctrlBufs[i], &ctrlCurrent, sizeof(_ctrl_data));
 }
 
 void __CtrlDoState(PointerWrap &p)
 {
 	std::lock_guard<std::recursive_mutex> guard(ctrlMutex);
+	
+	auto s = p.Section("sceCtrl", 1, 2);
+	if (!s)
+		return;
 
 	p.Do(analogEnabled);
 	p.Do(ctrlLatchBufs);
@@ -296,6 +338,11 @@ void __CtrlDoState(PointerWrap &p)
 	p.Do(ctrlBuf);
 	p.Do(ctrlBufRead);
 	p.Do(latch);
+	if (s == 1) {
+		dialogBtnMake = 0;
+	} else {
+		p.Do(dialogBtnMake);
+	}
 
 	p.Do(ctrlIdleReset);
 	p.Do(ctrlIdleBack);
@@ -307,7 +354,6 @@ void __CtrlDoState(PointerWrap &p)
 
 	p.Do(ctrlTimer);
 	CoreTiming::RestoreRegisterEvent(ctrlTimer, "CtrlSampleTimer", __CtrlTimerUpdate);
-	p.DoMarker("sceCtrl");
 }
 
 void __CtrlShutdown()
@@ -317,11 +363,11 @@ void __CtrlShutdown()
 
 u32 sceCtrlSetSamplingCycle(u32 cycle)
 {
-	DEBUG_LOG(HLE, "sceCtrlSetSamplingCycle(%u)", cycle);
+	DEBUG_LOG(SCECTRL, "sceCtrlSetSamplingCycle(%u)", cycle);
 
 	if ((cycle > 0 && cycle < 5555) || cycle > 20000)
 	{
-		WARN_LOG(HLE, "SCE_KERNEL_ERROR_INVALID_VALUE=sceCtrlSetSamplingCycle(%u)", cycle);
+		WARN_LOG(SCECTRL, "SCE_KERNEL_ERROR_INVALID_VALUE=sceCtrlSetSamplingCycle(%u)", cycle);
 		return SCE_KERNEL_ERROR_INVALID_VALUE;
 	}
 
@@ -338,7 +384,7 @@ u32 sceCtrlSetSamplingCycle(u32 cycle)
 
 int sceCtrlGetSamplingCycle(u32 cyclePtr)
 {
-	DEBUG_LOG(HLE, "sceCtrlSetSamplingCycle(%08x)", cyclePtr);
+	DEBUG_LOG(SCECTRL, "sceCtrlGetSamplingCycle(%08x)", cyclePtr);
 	if (Memory::IsValidAddress(cyclePtr))
 		Memory::Write_U32(ctrlCycle, cyclePtr);
 	return 0;
@@ -348,9 +394,9 @@ u32 sceCtrlSetSamplingMode(u32 mode)
 {
 	u32 retVal = 0;
 
-	DEBUG_LOG(HLE, "sceCtrlSetSamplingMode(%i)", mode);
+	DEBUG_LOG(SCECTRL, "sceCtrlSetSamplingMode(%i)", mode);
 	if (mode > 1)
-		return PSP_CTRL_ERROR_INVALID_MODE;
+		return SCE_KERNEL_ERROR_INVALID_MODE;
 
 	retVal = analogEnabled == true ? CTRL_MODE_ANALOG : CTRL_MODE_DIGITAL;
 	analogEnabled = mode == CTRL_MODE_ANALOG ? true : false;
@@ -360,7 +406,7 @@ u32 sceCtrlSetSamplingMode(u32 mode)
 int sceCtrlGetSamplingMode(u32 modePtr)
 {
 	u32 retVal = analogEnabled == true ? CTRL_MODE_ANALOG : CTRL_MODE_DIGITAL;
-	DEBUG_LOG(HLE, "%d=sceCtrlGetSamplingMode(%08x)", retVal, modePtr);
+	DEBUG_LOG(SCECTRL, "%d=sceCtrlGetSamplingMode(%08x)", retVal, modePtr);
 
 	if (Memory::IsValidAddress(modePtr))
 		Memory::Write_U32(retVal, modePtr);
@@ -370,7 +416,7 @@ int sceCtrlGetSamplingMode(u32 modePtr)
 
 int sceCtrlSetIdleCancelThreshold(int idleReset, int idleBack)
 {
-	DEBUG_LOG(HLE, "FAKE sceCtrlSetIdleCancelThreshold(%d, %d)", idleReset, idleBack);
+	DEBUG_LOG(SCECTRL, "FAKE sceCtrlSetIdleCancelThreshold(%d, %d)", idleReset, idleBack);
 
 	if (idleReset < -1 || idleBack < -1 || idleReset > 128 || idleBack > 128)
 		return SCE_KERNEL_ERROR_INVALID_VALUE;
@@ -382,7 +428,7 @@ int sceCtrlSetIdleCancelThreshold(int idleReset, int idleBack)
 
 int sceCtrlGetIdleCancelThreshold(u32 idleResetPtr, u32 idleBackPtr)
 {
-	DEBUG_LOG(HLE, "sceCtrlSetIdleCancelThreshold(%08x, %08x)", idleResetPtr, idleBackPtr);
+	DEBUG_LOG(SCECTRL, "sceCtrlSetIdleCancelThreshold(%08x, %08x)", idleResetPtr, idleBackPtr);
 
 	if (idleResetPtr && !Memory::IsValidAddress(idleResetPtr))
 		return PSP_CTRL_ERROR_INVALID_IDLE_PTR;
@@ -403,13 +449,13 @@ void sceCtrlReadBufferPositive(u32 ctrlDataPtr, u32 nBufs)
 	if (done != 0)
 	{
 		RETURN(done);
-		DEBUG_LOG(HLE, "%d=sceCtrlReadBufferPositive(%08x, %i)", done, ctrlDataPtr, nBufs);
+		DEBUG_LOG(SCECTRL, "%d=sceCtrlReadBufferPositive(%08x, %i)", done, ctrlDataPtr, nBufs);
 	}
 	else
 	{
 		waitingThreads.push_back(__KernelGetCurThread());
-		__KernelWaitCurThread(WAITTYPE_CTRL, CTRL_WAIT_POSITIVE, ctrlDataPtr, 0, false);
-		DEBUG_LOG(HLE, "sceCtrlReadBufferPositive(%08x, %i) - waiting", ctrlDataPtr, nBufs);
+		__KernelWaitCurThread(WAITTYPE_CTRL, CTRL_WAIT_POSITIVE, ctrlDataPtr, 0, false, "ctrl buffer waited");
+		DEBUG_LOG(SCECTRL, "sceCtrlReadBufferPositive(%08x, %i) - waiting", ctrlDataPtr, nBufs);
 	}
 }
 
@@ -419,33 +465,33 @@ void sceCtrlReadBufferNegative(u32 ctrlDataPtr, u32 nBufs)
 	if (done != 0)
 	{
 		RETURN(done);
-		DEBUG_LOG(HLE, "%d=sceCtrlReadBufferNegative(%08x, %i)", done, ctrlDataPtr, nBufs);
+		DEBUG_LOG(SCECTRL, "%d=sceCtrlReadBufferNegative(%08x, %i)", done, ctrlDataPtr, nBufs);
 	}
 	else
 	{
 		waitingThreads.push_back(__KernelGetCurThread());
-		__KernelWaitCurThread(WAITTYPE_CTRL, CTRL_WAIT_NEGATIVE, ctrlDataPtr, 0, false);
-		DEBUG_LOG(HLE, "sceCtrlReadBufferNegative(%08x, %i) - waiting", ctrlDataPtr, nBufs);
+		__KernelWaitCurThread(WAITTYPE_CTRL, CTRL_WAIT_NEGATIVE, ctrlDataPtr, 0, false, "ctrl buffer waited");
+		DEBUG_LOG(SCECTRL, "sceCtrlReadBufferNegative(%08x, %i) - waiting", ctrlDataPtr, nBufs);
 	}
 }
 
 int sceCtrlPeekBufferPositive(u32 ctrlDataPtr, u32 nBufs)
 {
 	int done = __CtrlReadBuffer(ctrlDataPtr, nBufs, false, true);
-	DEBUG_LOG(HLE, "%d=sceCtrlPeekBufferPositive(%08x, %i)", done, ctrlDataPtr, nBufs);
+	DEBUG_LOG(SCECTRL, "%d=sceCtrlPeekBufferPositive(%08x, %i)", done, ctrlDataPtr, nBufs);
 	return done;
 }
 
 int sceCtrlPeekBufferNegative(u32 ctrlDataPtr, u32 nBufs)
 {
 	int done = __CtrlReadBuffer(ctrlDataPtr, nBufs, true, true);
-	DEBUG_LOG(HLE, "%d=sceCtrlPeekBufferNegative(%08x, %i)", done, ctrlDataPtr, nBufs);
+	DEBUG_LOG(SCECTRL, "%d=sceCtrlPeekBufferNegative(%08x, %i)", done, ctrlDataPtr, nBufs);
 	return done;
 }
 
 u32 sceCtrlPeekLatch(u32 latchDataPtr)
 {
-	DEBUG_LOG(HLE, "sceCtrlPeekLatch(%08x)", latchDataPtr);
+	DEBUG_LOG(SCECTRL, "sceCtrlPeekLatch(%08x)", latchDataPtr);
 
 	if (Memory::IsValidAddress(latchDataPtr))
 		Memory::WriteStruct(latchDataPtr, &latch);
@@ -455,7 +501,7 @@ u32 sceCtrlPeekLatch(u32 latchDataPtr)
 
 u32 sceCtrlReadLatch(u32 latchDataPtr)
 {
-	DEBUG_LOG(HLE, "sceCtrlReadLatch(%08x)", latchDataPtr);
+	DEBUG_LOG(SCECTRL, "sceCtrlReadLatch(%08x)", latchDataPtr);
 
 	if (Memory::IsValidAddress(latchDataPtr))
 		Memory::WriteStruct(latchDataPtr, &latch);
@@ -476,8 +522,8 @@ static const HLEFunction sceCtrl[] =
 	{0x60B81F86, WrapV_UU<sceCtrlReadBufferNegative>, "sceCtrlReadBufferNegative"},
 	{0xB1D0E5CD, WrapU_U<sceCtrlPeekLatch>, "sceCtrlPeekLatch"},
 	{0x0B588501, WrapU_U<sceCtrlReadLatch>, "sceCtrlReadLatch"},
-	{0x348D99D4, 0, "sceCtrl_348D99D4"},
-	{0xAF5960F3, 0, "sceCtrl_AF5960F3"},
+	{0x348D99D4, 0, "sceCtrlSetSuspendingExtraSamples"},
+	{0xAF5960F3, 0, "sceCtrlGetSuspendingExtraSamples"},
 	{0xA68FD260, 0, "sceCtrlClearRapidFire"},
 	{0x6841BE1A, 0, "sceCtrlSetRapidFire"},
 	{0xa7144800, WrapI_II<sceCtrlSetIdleCancelThreshold>, "sceCtrlSetIdleCancelThreshold"},

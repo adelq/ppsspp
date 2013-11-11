@@ -112,6 +112,18 @@ enum NormalOp {
 	nrmXCHG,
 };
 
+enum
+{
+	CMP_EQ = 0,
+	CMP_LT = 1,
+	CMP_LE = 2,
+	CMP_UNORD = 3,
+	CMP_NEQ = 4,
+	CMP_NLT = 5,
+	CMP_NLE = 6,
+	CMP_ORD = 7,
+};
+
 class XEmitter;
 
 // RIP addressing does not benefit from micro op fusion on Core arch
@@ -138,8 +150,6 @@ struct OpArg
 	bool IsImm() const {return scale == SCALE_IMM8 || scale == SCALE_IMM16 || scale == SCALE_IMM32 || scale == SCALE_IMM64;}
 	bool IsSimpleReg() const {return scale == SCALE_NONE;}
 	bool IsSimpleReg(X64Reg reg) const {
-		if (!IsSimpleReg())
-			return false;
 		return GetSimpleReg() == reg;
 	}
 
@@ -170,9 +180,14 @@ struct OpArg
 			return INVALID_REG;
 	}
 
-  u32 GetImmValue() const {
-    return (u32)offset;
-  }
+	u32 GetImmValue() const {
+		return (u32)offset;
+	}
+
+	// For loops.
+	void IncreaseOffset(int sz) {
+		offset += sz;
+	}
 private:
 	u8 scale;
 	u16 offsetOrBaseReg;
@@ -211,7 +226,7 @@ inline u32 PtrOffset(void* ptr, void* base) {
 	s64 distance = (s64)ptr-(s64)base;
 	if (distance >= 0x80000000LL ||
 	    distance < -0x80000000LL) {
-		_assert_msg_(DYNA_REC, 0, "pointer offset out of range");
+		_assert_msg_(JIT, 0, "pointer offset out of range");
 		return 0;
 	}
 	return (u32)distance;
@@ -229,18 +244,6 @@ struct FixupBranch
 {
 	u8 *ptr;
 	int type; //0 = 8bit 1 = 32bit
-};
-
-enum SSECompare
-{
-	EQ = 0,
-	LT,
-	LE,
-	UNORD,
-	NEQ,
-	NLT,
-	NLE,
-	ORD,
 };
 
 typedef const u8* JumpTarget;
@@ -263,7 +266,12 @@ private:
 	void WriteNormalOp(XEmitter *emit, int bits, NormalOp op, const OpArg &a1, const OpArg &a2);
 
 protected:
-	inline void Write8(u8 value)   {*code++ = value;}
+	inline void Write8(u8 value)   {
+		//if (value == 0xcc) {
+		//	value = 0xcc;   // set breakpoint here to find where mysterious 0xcc are written
+		//}
+		*code++ = value;
+	}
 	inline void Write16(u16 value) {*(u16*)code = (value); code += 2;}
 	inline void Write32(u32 value) {*(u32*)code = (value); code += 4;}
 	inline void Write64(u64 value) {*(u64*)code = (value); code += 8;}
@@ -462,7 +470,18 @@ public:
 	// SSE/SSE2: Floating point bitwise (yes)
 	void CMPSS(X64Reg regOp, OpArg arg, u8 compare);  
 	void CMPSD(X64Reg regOp, OpArg arg, u8 compare);  
-	void ANDSS(X64Reg regOp, OpArg arg);  
+
+	inline void CMPEQSS(X64Reg regOp, OpArg arg) { CMPSS(regOp, arg, CMP_EQ); }
+	inline void CMPLTSS(X64Reg regOp, OpArg arg) { CMPSS(regOp, arg, CMP_LT); }
+	inline void CMPLESS(X64Reg regOp, OpArg arg) { CMPSS(regOp, arg, CMP_LE); }
+	inline void CMPUNORDSS(X64Reg regOp, OpArg arg) { CMPSS(regOp, arg, CMP_UNORD); }
+	inline void CMPNEQSS(X64Reg regOp, OpArg arg) { CMPSS(regOp, arg, CMP_NEQ); }
+	inline void CMPNLTSS(X64Reg regOp, OpArg arg) { CMPSS(regOp, arg, CMP_NLT); }
+	inline void CMPORDSS(X64Reg regOp, OpArg arg) { CMPSS(regOp, arg, CMP_ORD); }
+
+
+	// I don't think these exist
+	/*
 	void ANDSD(X64Reg regOp, OpArg arg);  
 	void ANDNSS(X64Reg regOp, OpArg arg); 
 	void ANDNSD(X64Reg regOp, OpArg arg); 
@@ -470,6 +489,7 @@ public:
 	void ORSD(X64Reg regOp, OpArg arg);   
 	void XORSS(X64Reg regOp, OpArg arg);   
 	void XORSD(X64Reg regOp, OpArg arg);   
+	*/
 
 	// SSE/SSE2: Floating point packed arithmetic (x4 for float, x2 for double)
 	void ADDPS(X64Reg regOp, OpArg arg); 
@@ -561,7 +581,10 @@ public:
 	void CVTDQ2PS(X64Reg regOp, OpArg arg);
 	void CVTPS2DQ(X64Reg regOp, OpArg arg);
 
+	void CVTSI2SS(X64Reg xregdest, OpArg arg);  // Yeah, destination really is a GPR like EAX!
+	void CVTSS2SI(X64Reg xregdest, OpArg arg);  // Yeah, destination really is a GPR like EAX!
 	void CVTTSS2SI(X64Reg xregdest, OpArg arg);  // Yeah, destination really is a GPR like EAX!
+	void CVTTSD2SI(X64Reg xregdest, OpArg arg);  // Yeah, destination really is a GPR like EAX!
 	void CVTTPS2DQ(X64Reg regOp, OpArg arg);
 
 	// SSE2: Packed integer instructions
@@ -620,7 +643,8 @@ public:
 	void PMAXUB(X64Reg dest, OpArg arg);  
 	void PMINSW(X64Reg dest, OpArg arg);  
 	void PMINUB(X64Reg dest, OpArg arg);  
-
+	// SSE4 has PMAXSB and PMINSB and PMAXUW and PMINUW too if we need them.
+	
 	void PMOVMSKB(X64Reg dest, OpArg arg);
 	void PSHUFB(X64Reg dest, OpArg arg);
 
@@ -653,10 +677,13 @@ public:
 	void ABI_CallFunctionCC(void *func, u32 param1, u32 param2);
 	void ABI_CallFunctionCCC(void *func, u32 param1, u32 param2, u32 param3);
 	void ABI_CallFunctionCCP(void *func, u32 param1, u32 param2, void *param3);
-	void ABI_CallFunctionCCCP(void *func, u32 param1, u32 param2,u32 param3, void *param4);
-	void ABI_CallFunctionPPC(void *func, void *param1, void *param2,u32 param3);
+	void ABI_CallFunctionCCCP(void *func, u32 param1, u32 param2, u32 param3, void *param4);
+	void ABI_CallFunctionP(void *func, void *param1);
+	void ABI_CallFunctionPPC(void *func, void *param1, void *param2, u32 param3);
 	void ABI_CallFunctionAC(void *func, const Gen::OpArg &arg1, u32 param2);
+	void ABI_CallFunctionACC(void *func, const Gen::OpArg &arg1, u32 param2, u32 param3);
 	void ABI_CallFunctionA(void *func, const Gen::OpArg &arg1);
+	void ABI_CallFunctionAA(void *func, const Gen::OpArg &arg1, const Gen::OpArg &arg2);
 
 	// Pass a register as a paremeter.
 	void ABI_CallFunctionR(void *func, Gen::X64Reg reg1);
@@ -728,7 +755,7 @@ public:
 		region_size = 0;
 	}
 
-	bool IsInCodeSpace(u8 *ptr)
+	bool IsInSpace(u8 *ptr)
 	{
 		return ptr >= region && ptr < region + region_size;
 	}
@@ -748,6 +775,14 @@ public:
 	size_t GetSpaceLeft() const
 	{
 		return region_size - (GetCodePtr() - region);
+	}
+
+	u8 *GetBasePtr() {
+		return region;
+	}
+
+	size_t GetOffset(u8 *ptr) {
+		return ptr - region;
 	}
 };
 

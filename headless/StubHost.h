@@ -33,9 +33,7 @@ public:
 
 	virtual void SetDebugMode(bool mode) { }
 
-	virtual void InitGL() {}
-	virtual void BeginFrame() {}
-	virtual void EndFrame() {}
+	virtual bool InitGL(std::string *error_message) {return false;}
 	virtual void ShutdownGL() {}
 
 	virtual void InitSound(PMixer *mixer) {}
@@ -44,12 +42,35 @@ public:
 
 	// this is sent from EMU thread! Make sure that Host handles it properly
 	virtual void BootDone() {}
-	virtual void PrepareShutdown() {}
 
 	virtual bool IsDebuggingEnabled() {return false;}
 	virtual bool AttemptLoadSymbolMap() {return false;}
 
-	virtual void SendDebugOutput(const std::string &output) { printf("%s", output.c_str()); }
+	virtual bool ShouldSkipUI() { return true; }
 
-	virtual bool isGLWorking() { return false; }
+	virtual void SendDebugOutput(const std::string &output) {
+		if (output.find('\n') != output.npos) {
+			DoFlushDebugOutput();
+			fwrite(output.data(), sizeof(char), output.length(), stdout);
+		} else {
+			debugOutputBuffer_ += output;
+		}
+	}
+	virtual void FlushDebugOutput() {
+		DoFlushDebugOutput();
+	}
+	inline void DoFlushDebugOutput() {
+		if (!debugOutputBuffer_.empty()) {
+			fwrite(debugOutputBuffer_.data(), sizeof(char), debugOutputBuffer_.length(), stdout);
+			debugOutputBuffer_.clear();
+		}
+	}
+	virtual void SetComparisonScreenshot(const std::string &filename) {}
+
+
+	// Unique for HeadlessHost
+	virtual void SwapBuffers() {}
+
+protected:
+	std::string debugOutputBuffer_;
 };

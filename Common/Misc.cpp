@@ -22,7 +22,7 @@
 #endif
 
 #ifdef _WIN32
-#include <windows.h>
+#include "CommonWindows.h"
 #endif
 
 // Generic function to get last error message.
@@ -35,7 +35,7 @@ const char* GetLastErrorMsg()
 #ifdef _WIN32
 	static __declspec(thread) char err_str[buff_size] = {};
 
-	FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(),
+	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(),
 		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
 		err_str, buff_size, NULL);
 #else

@@ -19,7 +19,11 @@
 #define _MEMARENA_H_
 
 #ifdef _WIN32
-#include <windows.h>
+#include "CommonWindows.h"
+#endif
+
+#ifdef __SYMBIAN32__
+#include <e32std.h>
 #endif
 
 #include "Common.h"
@@ -36,8 +40,12 @@ public:
 	void *CreateView(s64 offset, size_t size, void *base = 0);
 	void ReleaseView(void *view, size_t size);
 
+#ifdef __SYMBIAN32__
+	RChunk* memmap;
+#else
 	// This only finds 1 GB in 32-bit
 	static u8 *Find4GBBase();
+#endif
 private:
 
 #ifdef _WIN32
@@ -51,6 +59,7 @@ enum {
 	MV_MIRROR_PREVIOUS = 1,
 	// MV_FAKE_VMEM = 2,
 	// MV_WII_ONLY = 4,
+	MV_IS_PRIMARY_RAM = 0x100,
 };
 
 struct MemoryView

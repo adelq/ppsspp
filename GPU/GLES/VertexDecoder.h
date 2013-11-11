@@ -17,83 +17,48 @@
 
 #pragma once
 
-#include "../GPUState.h"
-#include "../Globals.h"
 #include "base/basictypes.h"
 
-// DecVtxFormat - vertex formats for PC
-// Kind of like a D3D VertexDeclaration.
-// Can write code to easily bind these using OpenGL, or read these manually.
-// No morph support, that is taken care of by the VertexDecoder.
+#ifdef ARM
+#include "Common/ArmEmitter.h"
+#else
+#include "Common/x64Emitter.h"
+#endif
 
-enum {
-	DEC_NONE,
-	DEC_FLOAT_1,
-	DEC_FLOAT_2,
-	DEC_FLOAT_3,
-	DEC_FLOAT_4,
-	DEC_S8_3,
-	DEC_S16_3,
-	DEC_U8_4,
-};
-
-int DecFmtSize(u8 fmt);
-
-struct DecVtxFormat {
-	u8 w0fmt; u8 w0off;  // first 4 weights
-	u8 w1fmt; u8 w1off;  // second 4 weights
-	u8 uvfmt; u8 uvoff;
-	u8 c0fmt; u8 c0off;  // First color
-	u8 c1fmt; u8 c1off;
-	u8 nrmfmt; u8 nrmoff;
-	u8 posfmt; u8 posoff;
-	short stride;
-};
-
-// This struct too.
-struct TransformedVertex
-{
-	float x, y, z, fog;     // in case of morph, preblend during decode
-	float u; float v;      // scaled by uscale, vscale, if there
-	float color0[4];   // prelit
-	float color1[3];   // prelit
-};
-
-DecVtxFormat GetTransformedVtxFormat(const DecVtxFormat &fmt);
+#include "Globals.h"
+#include "Core/Reporting.h"
+#include "GPU/GPUState.h"
+#include "GPU/Common/VertexDecoderCommon.h"
 
 class VertexDecoder;
+class VertexDecoderJitCache;
 
 typedef void (VertexDecoder::*StepFunction)() const;
 
 
+typedef void (*JittedVertexDecoder)(const u8 *src, u8 *dst, int count);
+
 // Right now
-//   - only contains computed information
-//   - does decoding in nasty branchfilled loops
+//   - compiles into list of called functions
 // Future TODO
-//   - should be cached, not recreated every time
-//   - will compile into list of called functions
 //   - will compile into lighting fast specialized x86 and ARM
-//   - will not bother translating components that can be read directly
-//     by OpenGL ES. Will still have to translate 565 colors and things
-//     like that. DecodedVertex will not be a fixed struct. Will have to
-//     do morphing here.
 class VertexDecoder
 {
 public:
-	VertexDecoder() : coloff(0), nrmoff(0), posoff(0) {}
-	~VertexDecoder() {}
+	VertexDecoder();
 
-	void SetVertexType(u32 vtype);
+	// A jit cache is not mandatory, we don't use it in the sw renderer
+	void SetVertexType(u32 vtype, VertexDecoderJitCache *jitCache = 0);
+
 	u32 VertexType() const { return fmt_; }
+
 	const DecVtxFormat &GetDecVtxFmt() { return decFmt; }
 
-	void DecodeVerts(u8 *decoded, const void *verts, const void *inds, int prim, int count, int *indexLowerBound, int *indexUpperBound) const;
-
-	// This could be easily generalized to inject any one component. Don't know another use for it though.
-	u32 InjectUVs(u8 *decoded, const void *verts, float *customuv, int count) const;
+	void DecodeVerts(u8 *decoded, const void *verts, int indexLowerBound, int indexUpperBound) const;
 
 	bool hasColor() const { return col != 0; }
-	int VertexSize() const { return size; }
+	bool hasTexcoord() const { return tc != 0; }
+	int VertexSize() const { return size; }  // PSP format size
 
 	void Step_WeightsU8() const;
 	void Step_WeightsU16() const;
@@ -102,10 +67,15 @@ public:
 	void Step_TcU8() const;
 	void Step_TcU16() const;
 	void Step_TcFloat() const;
-	void Step_TcU16Through() const;
-	void Step_TcFloatThrough() const;
 
-	// TODO: tcmorph
+	void Step_TcU8Prescale() const;
+	void Step_TcU16Prescale() const;
+	void Step_TcFloatPrescale() const;
+
+	void Step_TcU16Double() const;
+	void Step_TcU16Through() const;
+	void Step_TcU16ThroughDouble() const;
+	void Step_TcFloatThrough() const;
 
 	void Step_Color4444() const;
 	void Step_Color565() const;
@@ -137,6 +107,18 @@ public:
 	void Step_PosS16Through() const;
 	void Step_PosFloatThrough() const;
 
+	void ResetStats() {
+		memset(stats_, 0, sizeof(stats_));
+	}
+
+	void IncrementStat(int stat, int amount) {
+		stats_[stat] += amount;
+	}
+
+	// output must be big for safety.
+	// Returns number of chars written.
+	// Ugly for speed.
+	int ToString(char *output) const;
 
 	// Mutable decoder state
 	mutable u8 *decoded_;
@@ -170,148 +152,71 @@ public:
 	int idx;
 	int morphcount;
 	int nweights;
+
+	int stats_[NUM_VERTEX_DECODER_STATS];
+
+	JittedVertexDecoder jitted_;
+
+	friend class VertexDecoderJitCache;
 };
 
-// Reads decoded vertex formats in a convenient way. For software transform and debugging.
-class VertexReader
-{
+
+// A compiled vertex decoder takes the following arguments (C calling convention):
+// u8 *src, u8 *dst, int count
+//
+// x86:
+//   src is placed in esi and dst in edi
+//   for every vertex, we step esi and edi forwards by the two vertex sizes
+//   all movs are done relative to esi and edi
+//
+// that's it!
+
+
+#ifdef ARM
+class VertexDecoderJitCache : public ArmGen::ARMXCodeBlock {
+#else
+class VertexDecoderJitCache : public Gen::XCodeBlock {
+#endif
 public:
-	VertexReader(u8 *base, const DecVtxFormat &decFmt) : base_(base), data_(base), decFmt_(decFmt) {}
+	VertexDecoderJitCache();
 
-	void ReadPos(float pos[3]) {
-		switch (decFmt_.posfmt) {
-		case DEC_FLOAT_3:
-			memcpy(pos, data_ + decFmt_.posoff, 12);
-			break;
-		case DEC_S16_3:
-			{
-				s16 *p = (s16 *)(data_ + decFmt_.posoff);
-				for (int i = 0; i < 3; i++)
-					pos[i] = p[i] / 32767.0f;
-			}
-			break;
-		case DEC_S8_3:
-			{
-				s8 *p = (s8 *)(data_ + decFmt_.posoff);
-				for (int i = 0; i < 3; i++)
-					pos[i] = p[i] / 127.0f;
-			}
-			break;
-		default:
-			ERROR_LOG(G3D, "Reader: Unsupported Pos Format");
-			break;
-		}
-	}
+	// Returns a pointer to the code to run.
+	JittedVertexDecoder Compile(const VertexDecoder &dec);
 
-	void ReadNrm(float nrm[3]) {
-		switch (decFmt_.nrmfmt) {
-		case DEC_FLOAT_3:
-			memcpy(nrm, data_ + decFmt_.nrmoff, 12);
-			break;
-		case DEC_S16_3:
-			{
-				s16 *p = (s16 *)(data_ + decFmt_.nrmoff);
-				for (int i = 0; i < 3; i++)
-					nrm[i] = p[i] / 32767.0f;
-			}
-			break;
-		case DEC_S8_3:
-			{
-				s8 *p = (s8 *)(data_ + decFmt_.nrmoff);
-				for (int i = 0; i < 3; i++)
-					nrm[i] = p[i] / 127.0f;
-			}
-			break;
-		default:
-			ERROR_LOG(G3D, "Reader: Unsupported Nrm Format");
-			break;
-		}
-	}
+	void Jit_WeightsU8();
+	void Jit_WeightsU16();
+	void Jit_WeightsFloat();
 
-	void ReadUV(float uv[2]) {
-		switch (decFmt_.uvfmt) {
-		case DEC_FLOAT_2:
-			memcpy(uv, data_ + decFmt_.uvoff, 8); break;
-		default:
-			ERROR_LOG(G3D, "Reader: Unsupported UV Format");
-			break;
-		}
-	}
+	void Jit_TcU8();
+	void Jit_TcU16();
+	void Jit_TcFloat();
 
-	void ReadColor0(float color[4]) {
-		switch (decFmt_.c0fmt) {
-		case DEC_U8_4:
-			{
-				u8 *p = (u8 *)(data_ + decFmt_.c0off);
-				for (int i = 0; i < 4; i++)
-					color[i] = p[i] / 255.0f;
-			}
-			break;
-		case DEC_FLOAT_4:
-			memcpy(color, data_ + decFmt_.c0off, 16); break;
-		default:
-			ERROR_LOG(G3D, "Reader: Unsupported C0 Format");
-			break;
-		}
-	}
+	void Jit_TcU8Prescale();
+	void Jit_TcU16Prescale();
+	void Jit_TcFloatPrescale();
 
-	void ReadColor1(float color[3]) {
-		switch (decFmt_.c1fmt) {
-		case DEC_U8_4:
-			{
-				u8 *p = (u8 *)(data_ + decFmt_.c1off);
-				for (int i = 0; i < 3; i++)
-					color[i] = p[i] / 255.0f;
-			}
-			break;
-		case DEC_FLOAT_4:
-			memcpy(color, data_ + decFmt_.c1off, 12); break;
-		default:
-			ERROR_LOG(G3D, "Reader: Unsupported C1 Format");
-			break;
-		}
-	}
+	void Jit_TcU16Double();
+	void Jit_TcU16ThroughDouble();
 
-	void ReadWeights(float weights[8]) {
-		switch (decFmt_.w0fmt) {
-		case DEC_FLOAT_1: memcpy(weights, data_ + decFmt_.w0off, 4); break;
-		case DEC_FLOAT_2: memcpy(weights, data_ + decFmt_.w0off, 8); break;
-		case DEC_FLOAT_3: memcpy(weights, data_ + decFmt_.w0off, 12); break;
-		case DEC_FLOAT_4: memcpy(weights, data_ + decFmt_.w0off, 16); break;
-		default:
-			ERROR_LOG(G3D, "Reader: Unsupported W0 Format");
-			break;
-		}
-		switch (decFmt_.w1fmt) {
-		case 0:
-			// It's fine for there to be w0 weights but not w1.
-			break;
-		case DEC_FLOAT_1: memcpy(weights + 4, data_ + decFmt_.w1off, 4); break;
-		case DEC_FLOAT_2: memcpy(weights + 4, data_ + decFmt_.w1off, 8); break;
-		case DEC_FLOAT_3: memcpy(weights + 4, data_ + decFmt_.w1off, 12); break;
-		case DEC_FLOAT_4: memcpy(weights + 4, data_ + decFmt_.w1off, 16); break;
-		default:
-			ERROR_LOG(G3D, "Reader: Unsupported W1 Format");
-			break;
-		}
-	}
+	void Jit_TcU16Through();
+	void Jit_TcFloatThrough();
 
-	bool hasColor0() const { return decFmt_.c0fmt != 0; }
-	bool hasNormal() const { return decFmt_.nrmfmt != 0; }
-	bool hasUV() const { return decFmt_.uvfmt != 0; }
+	void Jit_Color8888();
+	void Jit_Color4444();
+	void Jit_Color565();
+	void Jit_Color5551();
 
-	void Goto(int index) {
-		data_ = base_ + index * decFmt_.stride;
-	}
+	void Jit_NormalS8();
+	void Jit_NormalS16();
+	void Jit_NormalFloat();
+
+	void Jit_PosS8();
+	void Jit_PosS8Through();
+	void Jit_PosS16();
+	void Jit_PosS16Through();
+	void Jit_PosFloat();
 
 private:
-	u8 *base_;
-	u8 *data_;
-	DecVtxFormat decFmt_;
-	int vtype_;
+	bool CompileStep(const VertexDecoder &dec, int i);
+	const VertexDecoder *dec_;
 };
-
-// Debugging utilities
-void PrintDecodedVertex(VertexReader &vtx);
-
-

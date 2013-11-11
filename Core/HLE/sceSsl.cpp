@@ -16,6 +16,7 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include "HLE.h"
+#include "ChunkFile.h"
 
 #include "sceSsl.h"
 
@@ -37,10 +38,13 @@ void __SslInit()
 
 void __SslDoState(PointerWrap &p)
 {
+	auto s = p.Section("sceSsl", 1);
+	if (!s)
+		return;
+
 	p.Do(isSslInit);
 	p.Do(maxMemSize);
 	p.Do(currentMemSize);
-	p.DoMarker("sceSsl");
 }
 
 int sceSslInit(int heapSize)

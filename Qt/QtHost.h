@@ -12,6 +12,7 @@
 #include "gfx/texture.h"
 #include "input/input_state.h"
 #include "math/math_util.h"
+#include "base/mutex.h"
 #include "math/lin/matrix4x4.h"
 #include <QGLWidget>
 
@@ -33,7 +34,7 @@ public:
 
 	void AddSymbol(std::string name, u32 addr, u32 size, int type);
 
-	void InitGL();
+	bool InitGL(std::string *error_string);
 	void BeginFrame();
 	void EndFrame();
 	void ShutdownGL();
@@ -43,15 +44,28 @@ public:
 	void ShutdownSound();
 
 	bool IsDebuggingEnabled();
+	bool GPUDebuggingActive();
 	void BootDone();
 	void PrepareShutdown();
 	bool AttemptLoadSymbolMap();
 	void SetWindowTitle(const char *message);
 
+	void GPUNotifyCommand(u32 pc);
+
+	void SendCoreWait(bool);
+	bool GpuStep();
+	void SendGPUWait(u32 cmd, u32 addr, void* data);
+	void SendGPUStart();
+	void SetGPUStep(bool value, int flag = 0, u32 data = 0);
+	void NextGPUStep();
+
 signals:
 	void BootDoneSignal();
 private:
 	MainWindow* mainWindow;
+	bool m_GPUStep;
+	int m_GPUFlag;
+	u32 m_GPUData;
 };
 
 #endif // QTAPP_H

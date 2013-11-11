@@ -26,6 +26,13 @@ void Register_sceDisplay();
 // will return true once after every end-of-frame.
 bool __DisplayFrameDone();
 
+// Get information about the current framebuffer.
+bool __DisplayGetFramebuf(u8 **topaddr, u32 *linesize, u32 *pixelFormat, int mode);
+
 typedef void (*VblankCallback)();
 // Listen for vblank events.  Only register during init.
 void __DisplayListenVblank(VblankCallback callback);
+
+void __DisplayGetDebugStats(char stats[2048]);
+void __DisplayGetFPS(float *out_vps, float *out_fps, float *out_actual_fps);
+void __DisplayGetAveragedFPS(float *out_vps, float *out_fps);

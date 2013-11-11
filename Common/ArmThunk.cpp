@@ -15,9 +15,6 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
-#include <map>
-
-#include "Common.h"
 #include "MemoryUtil.h"
 #include "Thunk.h"
 
@@ -52,4 +49,6 @@ void ThunkManager::Shutdown()
 
 void *ThunkManager::ProtectFunction(void *function, int num_params)
 {
+	_dbg_assert_msg_(JIT, false, "Arm ThunkManager not implemented?  Will crash.");
+	return NULL;
 }

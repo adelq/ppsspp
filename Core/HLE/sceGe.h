@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include "Core/HLE/sceKernelThread.h"
+
 #define SCE_GE_LIST_COMPLETED		0
 #define SCE_GE_LIST_QUEUED			1
 #define SCE_GE_LIST_DRAWING			2
@@ -26,23 +28,40 @@
 
 // typedef void (*PspGeCallback)(int id, void *arg);
 
-typedef struct PspGeCallbackData
+struct PspGeCallbackData
 {
-	u32 signal_func;
-	u32 signal_arg; //ptr
-	u32 finish_func;  // PspGeCallback
-	u32 finish_arg;
-} PspGeCallbackData;
+	u32_le signal_func;
+	u32_le signal_arg; //ptr
+	u32_le finish_func;  // PspGeCallback
+	u32_le finish_arg;
+};
+
+struct PspGeListArgs
+{
+	SceSize_le size;
+	PSPPointer<u32_le> context;
+	u32_le numStacks;
+	u32_le unknown1;
+};
 
 void Register_sceGe_user();
 
 void __GeInit();
 void __GeDoState(PointerWrap &p);
 void __GeShutdown();
+bool __GeTriggerSync(WaitType waitType, int id, u64 atTicks);
+bool __GeTriggerInterrupt(int listid, u32 pc, u64 atTicks);
+void __GeWaitCurrentThread(WaitType type, SceUID waitId, const char *reason);
+bool __GeTriggerWait(WaitType type, SceUID waitId);
+bool __GeHasPendingInterrupt();
 
 
 // Export functions for use by Util/PPGe
 u32 sceGeRestoreContext(u32 ctxAddr);
 u32 sceGeSaveContext(u32 ctxAddr);
+int sceGeBreak(u32 mode);
+int sceGeContinue();
+int sceGeListSync(u32 displayListID, u32 mode);
 
 u32 sceGeListEnQueue(u32 listAddress, u32 stallAddress, int callbackId, u32 optParamAddr);
+u32 sceGeListEnQueueHead(u32 listAddress, u32 stallAddress, int callbackId, u32 optParamAddr);

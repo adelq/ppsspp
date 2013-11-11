@@ -15,7 +15,6 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
-#include "Common.h"
 #include "x64Emitter.h"
 #include "ABI.h"
 
@@ -124,7 +123,14 @@ void XEmitter::ABI_CallFunctionCCCP(void *func, u32 param1, u32 param2,u32 param
 	ABI_RestoreStack(4 * 4);
 }
 
-void XEmitter::ABI_CallFunctionPPC(void *func, void *param1, void *param2,u32 param3) {
+void XEmitter::ABI_CallFunctionP(void *func, void *param1) {
+	ABI_AlignStack(1 * 4);
+	PUSH(32, Imm32((u32)param1));
+	CALL(func);
+	ABI_RestoreStack(1 * 4);
+}
+
+void XEmitter::ABI_CallFunctionPPC(void *func, void *param1, void *param2, u32 param3) {
 	ABI_AlignStack(3 * 4);
 	PUSH(32, Imm32(param3));
 	PUSH(32, Imm32((u32)param2));
@@ -160,12 +166,31 @@ void XEmitter::ABI_CallFunctionAC(void *func, const Gen::OpArg &arg1, u32 param2
 	ABI_RestoreStack(2 * 4);
 }
 
+void XEmitter::ABI_CallFunctionACC(void *func, const Gen::OpArg &arg1, u32 param2, u32 param3)
+{
+	ABI_AlignStack(3 * 4);
+	PUSH(32, Imm32(param3));
+	PUSH(32, Imm32(param2));
+	PUSH(32, arg1);
+	CALL(func);
+	ABI_RestoreStack(3 * 4);
+}
+
 void XEmitter::ABI_CallFunctionA(void *func, const Gen::OpArg &arg1)
 {
 	ABI_AlignStack(1 * 4);
 	PUSH(32, arg1);
 	CALL(func);
 	ABI_RestoreStack(1 * 4);
+}
+
+void XEmitter::ABI_CallFunctionAA(void *func, const Gen::OpArg &arg1, const Gen::OpArg &arg2)
+{
+	ABI_AlignStack(2 * 4);
+	PUSH(32, arg2);
+	PUSH(32, arg1);
+	CALL(func);
+	ABI_RestoreStack(2 * 4);
 }
 
 void XEmitter::ABI_PushAllCalleeSavedRegsAndAdjustStack() {
@@ -334,6 +359,19 @@ void XEmitter::ABI_CallFunctionCCCP(void *func, u32 param1, u32 param2, u32 para
 	}
 }
 
+void XEmitter::ABI_CallFunctionP(void *func, void *param1) {
+	MOV(64, R(ABI_PARAM1), Imm64((u64)param1));
+	u64 distance = u64(func) - (u64(code) + 5);
+	if (distance >= 0x0000000080000000ULL
+	 && distance <  0xFFFFFFFF80000000ULL) {
+	    // Far call
+	    MOV(64, R(RAX), Imm64((u64)func));
+	    CALLptr(R(RAX));
+	} else {
+	    CALL(func);
+	}
+}
+
 void XEmitter::ABI_CallFunctionPPC(void *func, void *param1, void *param2, u32 param3) {
 	MOV(64, R(ABI_PARAM1), Imm64((u64)param1));
 	MOV(64, R(ABI_PARAM2), Imm64((u64)param2));
@@ -404,10 +442,43 @@ void XEmitter::ABI_CallFunctionAC(void *func, const Gen::OpArg &arg1, u32 param2
 	}
 }
 
+void XEmitter::ABI_CallFunctionACC(void *func, const Gen::OpArg &arg1, u32 param2, u32 param3)
+{
+	MOV(32, R(ABI_PARAM1), arg1);
+	MOV(32, R(ABI_PARAM2), Imm32(param2));
+	MOV(64, R(ABI_PARAM3), Imm64(param3));
+	u64 distance = u64(func) - (u64(code) + 5);
+	if (distance >= 0x0000000080000000ULL
+	 && distance <  0xFFFFFFFF80000000ULL) {
+	    // Far call
+	    MOV(64, R(RAX), Imm64((u64)func));
+	    CALLptr(R(RAX));
+	} else {
+	    CALL(func);
+	}
+}
+
 void XEmitter::ABI_CallFunctionA(void *func, const Gen::OpArg &arg1)
 {
 	if (!arg1.IsSimpleReg(ABI_PARAM1))
 		MOV(32, R(ABI_PARAM1), arg1);
+	u64 distance = u64(func) - (u64(code) + 5);
+	if (distance >= 0x0000000080000000ULL
+	 && distance <  0xFFFFFFFF80000000ULL) {
+	    // Far call
+	    MOV(64, R(RAX), Imm64((u64)func));
+	    CALLptr(R(RAX));
+	} else {
+	    CALL(func);
+	}
+}
+
+void XEmitter::ABI_CallFunctionAA(void *func, const Gen::OpArg &arg1, const Gen::OpArg &arg2)
+{
+	if (!arg1.IsSimpleReg(ABI_PARAM1))
+		MOV(32, R(ABI_PARAM1), arg1);
+	if (!arg2.IsSimpleReg(ABI_PARAM2))
+		MOV(32, R(ABI_PARAM2), arg2);
 	u64 distance = u64(func) - (u64(code) + 5);
 	if (distance >= 0x0000000080000000ULL
 	 && distance <  0xFFFFFFFF80000000ULL) {
@@ -425,22 +496,35 @@ unsigned int XEmitter::ABI_GetAlignedFrameSize(unsigned int frameSize) {
 
 #ifdef _WIN32
 
+// The Windows x64 ABI requires XMM6 - XMM15 to be callee saved.  10 regs.
+// But, not saving XMM4 and XMM5 breaks things in VS 2010, even though they are volatile regs.
+// Let's just save all 16.
+const int XMM_STACK_SPACE = 16 * 16;
+
 // Win64 Specific Code
 void XEmitter::ABI_PushAllCalleeSavedRegsAndAdjustStack() {
 	//we only want to do this once
-	PUSH(RBX); 
-	PUSH(RSI); 
+	PUSH(RBX);
+	PUSH(RSI);
 	PUSH(RDI);
 	PUSH(RBP);
-	PUSH(R12); 
-	PUSH(R13); 
-	PUSH(R14); 
+	PUSH(R12);
+	PUSH(R13);
+	PUSH(R14);
 	PUSH(R15);
-	//TODO: Also preserve XMM0-3?
 	ABI_AlignStack(0);
+
+	// Do this after aligning, beacuse before it's offset by 8.
+	SUB(64, R(RSP), Imm32(XMM_STACK_SPACE));
+	for (int i = 0; i < 16; ++i)
+		MOVAPS(MDisp(RSP, i * 16), (X64Reg)(XMM0 + i));
 }
 
 void XEmitter::ABI_PopAllCalleeSavedRegsAndAdjustStack() {
+	for (int i = 0; i < 16; ++i)
+		MOVAPS((X64Reg)(XMM0 + i), MDisp(RSP, i * 16));
+	ADD(64, R(RSP), Imm32(XMM_STACK_SPACE));
+
 	ABI_RestoreStack(0);
 	POP(R15);
 	POP(R14); 
@@ -462,7 +546,7 @@ void XEmitter::ABI_PushAllCallerSavedRegsAndAdjustStack() {
 	PUSH(R9);
 	PUSH(R10);
 	PUSH(R11);
-	//TODO: Also preserve XMM0-15?
+	// TODO: Callers preserve XMM4-5 (XMM0-3 are args.)
 	ABI_AlignStack(0);
 }
 
@@ -496,6 +580,7 @@ void XEmitter::ABI_PushAllCalleeSavedRegsAndAdjustStack() {
 	PUSH(R14); 
 	PUSH(R15);
 	PUSH(R15); //just to align stack. duped push/pop doesn't hurt.
+	// TODO: XMM?
 }
 
 void XEmitter::ABI_PopAllCalleeSavedRegsAndAdjustStack() {

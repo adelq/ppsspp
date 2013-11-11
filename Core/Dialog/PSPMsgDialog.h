@@ -19,23 +19,36 @@
 
 #include "PSPDialog.h"
 
-#define SCE_UTILITY_MSGDIALOG_OPTION_ERROR				0 // Do nothing
+#define SCE_UTILITY_MSGDIALOG_OPTION_ERROR				0x00000000
 #define SCE_UTILITY_MSGDIALOG_OPTION_TEXT				0x00000001
+#define SCE_UTILITY_MSGDIALOG_OPTION_NOSOUND			0x00000002
 #define SCE_UTILITY_MSGDIALOG_OPTION_YESNO				0x00000010
 #define SCE_UTILITY_MSGDIALOG_OPTION_OK					0x00000020
+#define SCE_UTILITY_MSGDIALOG_OPTION_NOCANCEL			0x00000080
 #define SCE_UTILITY_MSGDIALOG_OPTION_DEFAULT_NO			0x00000100
 
-#define SCE_UTILITY_MSGDIALOG_DEBUG_OPTION_CODED		0x00000131 // OR of all options coded to display warning
+#define SCE_UTILITY_MSGDIALOG_SIZE_V1					572
+#define SCE_UTILITY_MSGDIALOG_SIZE_V2					580
+#define SCE_UTILITY_MSGDIALOG_SIZE_V3					708
+
+#define SCE_UTILITY_MSGDIALOG_DEBUG_OPTION_CODED		0x000001B3 // OR of all options coded to display warning
+
+#define SCE_UTILITY_MSGDIALOG_ERROR_BADOPTION			0x80110501
+#define SCE_UTILITY_MSGDIALOG_ERROR_ERRORCODEINVALID	0x80110502
 
 struct pspMessageDialog
 {
 	pspUtilityDialogCommon common;
-	int result;
-	int type;
-	unsigned int errorNum;
+	s32_le result;
+	s32_le type;
+	u32_le errorNum;
 	char string[512];
-	unsigned int options;
-	unsigned int buttonPressed;	// 0=?, 1=Yes/OK, 2=No, 3=Back
+	// End of request V1 (Size 572)
+	u32_le options;
+	u32_le buttonPressed;
+	// End of request V2 (Size 580)
+	s32_le unknown[32];
+	// End of request V3 (Size 708)
 };
 
 
@@ -45,35 +58,35 @@ public:
 	virtual ~PSPMsgDialog();
 
 	virtual int Init(unsigned int paramAddr);
-	virtual int Update();
-	virtual int Shutdown();
+	virtual int Update(int animSpeed);
+	virtual int Shutdown(bool force = false);
 	virtual void DoState(PointerWrap &p);
+	virtual pspUtilityDialogCommon *GetCommonParam();
+
+	int Abort();
 
 private :
-	void DisplayBack();
-	void DisplayYesNo();
-	void DisplayEnterBack();
+	void DisplayMessage(std::string text, bool hasYesNo = false, bool hasOK = false);
 
-	enum DisplayState
+	enum Flags
 	{
-		DS_NONE,
-
-		DS_MESSAGE,
-		DS_ERROR,
-		DS_YESNO,
-		DS_OK
+		DS_MSG 				= 0x1,
+		DS_ERRORMSG 		= 0x2,
+		DS_YESNO 			= 0x4,
+		DS_DEFNO 			= 0x8,
+		DS_OK 				= 0x10,
+		DS_VALIDBUTTON 		= 0x20,
+		DS_CANCELBUTTON 	= 0x40,
+		DS_NOSOUND			= 0x80,
+		DS_ERROR 			= 0x100
 	};
 
-	DisplayState display;
+	u32 flag;
 
 	pspMessageDialog messageDialog;
 	int messageDialogAddr;
 
+	char msgText[512];
 	int yesnoChoice;
-
-	int okButtonImg;
-	int cancelButtonImg;
-	int okButtonFlag;
-	int cancelButtonFlag;
 };
 

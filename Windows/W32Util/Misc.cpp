@@ -1,5 +1,8 @@
 #include "stdafx.h"
+#include <WinUser.h>
 #include "Misc.h"
+#include "util/text/utf8.h"
+#include <commctrl.h>
 
 namespace W32Util
 {
@@ -56,26 +59,164 @@ namespace W32Util
 			sprintf(out,"%3.1f %s",f,sizes[s]);
 	}
 
-	BOOL CopyTextToClipboard(HWND hwnd, const TCHAR *text)
-	{
+	BOOL CopyTextToClipboard(HWND hwnd, const char *text) {
+		std::wstring wtext = ConvertUTF8ToWString(text);
 		OpenClipboard(hwnd);
 		EmptyClipboard();
-		HANDLE hglbCopy = GlobalAlloc(GMEM_MOVEABLE, (strlen(text) + 1) * sizeof(TCHAR)); 
-		if (hglbCopy == NULL) 
-		{ 
+		HANDLE hglbCopy = GlobalAlloc(GMEM_MOVEABLE, (wtext.size() + 1) * sizeof(wchar_t)); 
+		if (hglbCopy == NULL) { 
 			CloseClipboard(); 
 			return FALSE; 
 		} 
 
 		// Lock the handle and copy the text to the buffer. 
 
-		TCHAR *lptstrCopy = (TCHAR *)GlobalLock(hglbCopy); 
-		strcpy(lptstrCopy, text); 
-		lptstrCopy[strlen(text)] = (TCHAR) 0;    // null character 
+		wchar_t *lptstrCopy = (wchar_t *)GlobalLock(hglbCopy); 
+		wcscpy(lptstrCopy, wtext.c_str()); 
+		lptstrCopy[wtext.size()] = (wchar_t) 0;    // null character 
 		GlobalUnlock(hglbCopy); 
-		SetClipboardData(CF_TEXT,hglbCopy);
+		SetClipboardData(CF_UNICODETEXT, hglbCopy);
 		CloseClipboard();
 		return TRUE;
 	}
 
+	void MakeTopMost(HWND hwnd, bool topMost) {
+		HWND style = HWND_NOTOPMOST;
+		if (topMost) style = HWND_TOPMOST;
+		SetWindowPos(hwnd, style, 0,0,0,0, SWP_NOMOVE | SWP_NOSIZE);
+	}
+
+}
+
+
+
+GenericListControl::GenericListControl(HWND hwnd, const GenericListViewColumn* _columns, int _columnCount)
+	: handle(hwnd), columns(_columns),columnCount(_columnCount),valid(false)
+{
+	DWORD style = GetWindowLong(handle,GWL_STYLE) | LVS_REPORT;
+	SetWindowLong(handle, GWL_STYLE, style);
+
+	SetWindowLongPtr(handle,GWLP_USERDATA,(LONG_PTR)this);
+	oldProc = (WNDPROC) SetWindowLongPtr(handle,GWLP_WNDPROC,(LONG_PTR)wndProc);
+
+	SendMessage(handle, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT);
+
+	LVCOLUMN lvc; 
+	lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+	lvc.iSubItem = 0;
+	lvc.fmt = LVCFMT_LEFT;
+	
+	RECT rect;
+	GetClientRect(handle,&rect);
+
+	int totalListSize = rect.right-rect.left;
+	for (int i = 0; i < columnCount; i++) {
+		lvc.cx = columns[i].size * totalListSize;
+		lvc.pszText = columns[i].name;
+		ListView_InsertColumn(handle, i, &lvc);
+	}
+
+	SetSendInvalidRows(false);
+	valid = true;
+}
+
+void GenericListControl::HandleNotify(LPARAM lParam)
+{
+	LPNMHDR mhdr = (LPNMHDR) lParam;
+
+	if (mhdr->code == NM_DBLCLK)
+	{
+		LPNMITEMACTIVATE item = (LPNMITEMACTIVATE) lParam;
+		if ((item->iItem != -1 && item->iItem < GetRowCount()) || sendInvalidRows)
+			OnDoubleClick(item->iItem,item->iSubItem);
+		return;
+	}
+
+	if (mhdr->code == NM_RCLICK)
+	{
+		const LPNMITEMACTIVATE item = (LPNMITEMACTIVATE)lParam;
+		if ((item->iItem != -1 && item->iItem < GetRowCount()) || sendInvalidRows)
+			OnRightClick(item->iItem,item->iSubItem,item->ptAction);
+		return;
+	}
+
+	if (mhdr->code == LVN_GETDISPINFO)
+	{
+		NMLVDISPINFO* dispInfo = (NMLVDISPINFO*)lParam;
+
+		stringBuffer[0] = 0;
+		GetColumnText(stringBuffer,dispInfo->item.iItem,dispInfo->item.iSubItem);
+		
+		if (stringBuffer[0] == 0)
+			wcscat(stringBuffer,L"Invalid");
+
+		dispInfo->item.pszText = stringBuffer;
+		return;
+	}
+}
+
+void GenericListControl::Update()
+{
+	int newRows = GetRowCount();
+
+	int items = ListView_GetItemCount(handle);
+	while (items < newRows)
+	{
+		LVITEM lvI;
+		lvI.pszText   = LPSTR_TEXTCALLBACK; // Sends an LVN_GETDISPINFO message.
+		lvI.mask      = LVIF_TEXT | LVIF_IMAGE |LVIF_STATE;
+		lvI.stateMask = 0;
+		lvI.iSubItem  = 0;
+		lvI.state     = 0;
+		lvI.iItem  = items;
+		lvI.iImage = items;
+
+		ListView_InsertItem(handle, &lvI);
+		items++;
+	}
+
+	while (items > newRows)
+	{
+		ListView_DeleteItem(handle,--items);
+	}
+
+	ResizeColumns();
+
+	InvalidateRect(handle,NULL,true);
+	UpdateWindow(handle);
+}
+
+void GenericListControl::ResizeColumns()
+{
+	RECT rect;
+	GetClientRect(handle,&rect);
+
+	int totalListSize = rect.right-rect.left;
+	for (int i = 0; i < columnCount; i++)
+	{
+		ListView_SetColumnWidth(handle,i,columns[i].size * totalListSize);
+	}
+}
+
+LRESULT CALLBACK GenericListControl::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	GenericListControl* list = (GenericListControl*) GetWindowLongPtr(hwnd,GWLP_USERDATA);
+
+	LRESULT returnValue;
+	if (list->valid && list->WindowMessage(msg,wParam,lParam,returnValue) == true)
+		return returnValue;
+
+	switch (msg)
+	{
+	case WM_SIZE:
+		list->ResizeColumns();
+		break;
+	}
+
+	return (LRESULT)CallWindowProc((WNDPROC)list->oldProc,hwnd,msg,wParam,lParam);
+}
+
+int GenericListControl::GetSelectedIndex()
+{
+	return ListView_GetNextItem(handle, -1, LVNI_SELECTED);
 }

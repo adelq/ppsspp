@@ -15,18 +15,14 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
-#ifndef _MEMMAP_H
-#define _MEMMAP_H
+#pragma once
 
 // Includes
 #include <string>
 #include "Common.h"
 #include "CommonTypes.h"
 
-// Enable memory checks in the Debug/DebugFast builds, but NOT in release
-#if defined(_DEBUG) || defined(DEBUGFAST)
-#define ENABLE_MEM_CHECK
-#endif
+#include "HDRemaster.h"
 
 // PPSSPP is very aggressive about trying to do memory accesses directly, for speed.
 // This can be a problem when debugging though, as stray memory reads and writes will
@@ -36,11 +32,6 @@
 #if defined(_DEBUG)
 //#define SAFE_MEMORY
 #endif
-// Required for UNUSABLE_MMAP. Can define this in cmake instead later
-#ifdef __SYMBIAN32__
-#define SAFE_MEMORY
-#endif
-
 
 // Global declarations
 class PointerWrap;
@@ -54,19 +45,6 @@ typedef void (*readFn8 )(u8&,  const u32);
 typedef void (*readFn16)(u16&, const u32);
 typedef void (*readFn32)(u32&, const u32);
 typedef void (*readFn64)(u64&, const u32);
-
-
-inline u32 PSP_GetKernelMemoryBase() { return 0x08000000;}
-inline u32 PSP_GetKernelMemoryEnd()  { return 0x08400000;} 
-// "Volatile" RAM is between 0x08400000 and 0x08800000, can be requested by the
-// game through sceKernelVolatileMemTryLock.
-
-inline u32 PSP_GetUserMemoryBase() { return 0x08800000;}
-inline u32 PSP_GetUserMemoryEnd()  { return 0x0A000000;}
-
-inline u32 PSP_GetDefaultLoadAddress() { return 0x08800000;}
-//inline u32 PSP_GetDefaultLoadAddress() { return 0x0898dab0;}
-inline u32 PSP_GetVidMemBase() { return 0x04000000;}
 
 namespace Memory
 {
@@ -94,19 +72,23 @@ extern u8 *m_pUncachedRAM;
 extern u8 *m_pPhysicalVRAM;
 extern u8 *m_pUncachedVRAM;
 
-// TODO: Later PSP models got more RAM.
+// These replace RAM_NORMAL_SIZE and RAM_NORMAL_MASK, respectively.
+extern u32 g_MemorySize;
+extern u32 g_MemoryMask;
+
 enum
 {
-	RAM_SIZE		= 0x2000000,  // 32 MB - although only the upper 24 are available for the user.
-	RAM_MASK		= RAM_SIZE - 1,
+	// This may be adjusted by remaster games.
+	RAM_NORMAL_SIZE = 0x02000000,
+	RAM_NORMAL_MASK = RAM_NORMAL_SIZE - 1,
 
-	VRAM_SIZE   = 0x200000,
-	VRAM_MASK	  = VRAM_SIZE - 1,
+	VRAM_SIZE       = 0x200000,
+	VRAM_MASK       = VRAM_SIZE - 1,
 
-	SCRATCHPAD_SIZE	= 0x4000,
-  SCRATCHPAD_MASK = SCRATCHPAD_SIZE - 1,
+	SCRATCHPAD_SIZE = 0x4000,
+	SCRATCHPAD_MASK = SCRATCHPAD_SIZE - 1,
 
-#if defined(_M_IX86) || defined(_M_ARM32)
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
   // This wraparound should work for PSP too.
 	MEMVIEW32_MASK  = 0x3FFFFFFF,
 #endif
@@ -116,29 +98,44 @@ enum
 void Init();
 void Shutdown();
 void DoState(PointerWrap &p);
-
 void Clear();
-bool AreMemoryBreakpointsActivated();
 
-inline u8* GetMainRAMPtr() {return m_pRAM;}
+struct Opcode {
+	Opcode() {
+	}
 
-// used by interpreter to read instructions, uses iCache
-u32 Read_Opcode(const u32 _Address);
+	explicit Opcode(u32 v) : encoding (v) {
+	}
+
+	u32 operator & (const u32 &arg) const {
+		return encoding & arg;
+	}
+
+	u32 operator >> (const u32 &arg) const {
+		return encoding >> arg;
+	}
+
+	bool operator == (const u32 &arg) const {
+		return encoding == arg;
+	}
+
+	bool operator != (const u32 &arg) const {
+		return encoding != arg;
+	}
+
+	u32 encoding;
+};
+
 // used by JIT to read instructions
-u32 Read_Opcode_JIT(const u32 _Address);
+Opcode Read_Opcode_JIT(const u32 _Address);
 // used by JIT. uses iCacheJIT. Reads in the "Locked cache" mode
-void Write_Opcode_JIT(const u32 _Address, const u32 _Value);
+void Write_Opcode_JIT(const u32 _Address, const Opcode _Value);
 // this is used by Debugger a lot. 
 // For now, just reads from memory!
-u32 Read_Instruction(const u32 _Address);
+Opcode Read_Instruction(const u32 _Address);
 
 
 // For use by emulator
-
-// Read and write functions
-#define NUMHWMEMFUN 64
-#define HWSHIFT 10
-#define HW_MASK 0x3FF
 
 u8  Read_U8(const u32 _Address);
 u16 Read_U16(const u32 _Address);
@@ -149,6 +146,13 @@ u64 Read_U64(const u32 _Address);
 #define _M_ARM
 #endif
 
+inline u8* GetPointerUnchecked(const u32 address) {
+#if defined(_M_IX86) || defined(_M_ARM32)
+	return (u8 *)(base + (address & MEMVIEW32_MASK));
+#else
+	return (u8 *)(base + address);
+#endif
+}
 
 #ifdef SAFE_MEMORY
 u32 ReadUnchecked_U32(const u32 _Address);
@@ -161,23 +165,23 @@ void WriteUnchecked_U32(const u32 _Data, const u32 _Address);
 #else
 
 inline u32 ReadUnchecked_U32(const u32 address) {
-#if defined(_M_IX86) || defined(_M_ARM32)
-  return (*(u32 *)(base + (address & MEMVIEW32_MASK)));
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
+  return *(u32_le *)(base + (address & MEMVIEW32_MASK));
 #else
-  return (*(u32 *)(base + address));
+  return *(u32_le *)(base + address);
 #endif
 }
 
 inline u16 ReadUnchecked_U16(const u32 address) {
-#if defined(_M_IX86) || defined(_M_ARM32)
-	return (*(u16 *)(base + (address & MEMVIEW32_MASK)));
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
+	return *(u16_le *)(base + (address & MEMVIEW32_MASK));
 #else
-	return (*(u16 *)(base + address));
+	return *(u16_le *)(base + address);
 #endif
 }
 
 inline u8 ReadUnchecked_U8(const u32 address) {
-#if defined(_M_IX86) || defined(_M_ARM32)
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
 	return (*(u8 *)(base + (address & MEMVIEW32_MASK))); 
 #else
 	return (*(u8 *)(base + address));
@@ -185,23 +189,23 @@ inline u8 ReadUnchecked_U8(const u32 address) {
 }
 
 inline void WriteUnchecked_U32(u32 data, u32 address) {
-#if defined(_M_IX86) || defined(_M_ARM32)
-	(*(u32 *)(base + (address & MEMVIEW32_MASK))) = data;
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
+	*(u32_le *)(base + (address & MEMVIEW32_MASK)) = data;
 #else
-	(*(u32 *)(base + address)) = data;
+	*(u32_le *)(base + address) = data;
 #endif
 }
 
 inline void WriteUnchecked_U16(u16 data, u32 address) {
-#if defined(_M_IX86) || defined(_M_ARM32)
-	(*(u16 *)(base + (address & MEMVIEW32_MASK))) = data;
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
+	*(u16_le *)(base + (address & MEMVIEW32_MASK)) = data;
 #else
-	(*(u16 *)(base + address)) = data;
+	*(u16_le *)(base + address) = data;
 #endif
 }
 
 inline void WriteUnchecked_U8(u8 data, u32 address) {
-#if defined(_M_IX86) || defined(_M_ARM32)
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
 	(*(u8 *)(base + (address & MEMVIEW32_MASK))) = data;
 #else
 	(*(u8 *)(base + address)) = data;
@@ -209,7 +213,6 @@ inline void WriteUnchecked_U8(u8 data, u32 address) {
 }
 
 #endif
-
 
 inline float Read_Float(u32 address) 
 {
@@ -223,19 +226,10 @@ inline float Read_Float(u32 address)
 u32 Read_U8_ZX(const u32 address);
 u32 Read_U16_ZX(const u32 address);
 
-// used by JIT (Jit64::lXz)
-u32 EFB_Read(const u32 addr);
-
 void Write_U8(const u8 data, const u32 address);
 void Write_U16(const u16 data, const u32 address);
 void Write_U32(const u32 data, const u32 address);
 void Write_U64(const u64 data, const u32 address);
-
-void Write_U16_Swap(const u16 data, const u32 address);
-void Write_U32_Swap(const u32 data, const u32 address);
-void Write_U64_Swap(const u64 data, const u32 address);
-
-void WriteHW_U32(const u32 data, const u32 address);
 
 inline void Write_Float(float f, u32 address)
 {
@@ -248,32 +242,220 @@ inline void Write_Float(float f, u32 address)
 void GetString(std::string& _string, const u32 _Address);
 u8* GetPointer(const u32 address);
 bool IsValidAddress(const u32 address);
+bool IsRAMAddress(const u32 address);
+bool IsVRAMAddress(const u32 address);
 
 inline const char* GetCharPointer(const u32 address) {
   return (const char *)GetPointer(address);
 }
 
 void Memset(const u32 _Address, const u8 _Data, const u32 _iLength);
-void Memcpy(const u32 to_address, const void *from_data, const u32 len);
-void Memcpy(void *to_data, const u32 from_address, const u32 len);
+
+inline void Memcpy(const u32 to_address, const void *from_data, const u32 len)
+{
+	u8 *to = GetPointer(to_address);
+	if (to) {
+		memcpy(to, from_data, len);
+	}
+	// if not, GetPointer will log.
+}
+
+inline void Memcpy(void *to_data, const u32 from_address, const u32 len)
+{
+	const u8 *from = GetPointer(from_address);
+	if (from) {
+		memcpy(to_data, from, len);
+	}
+	// if not, GetPointer will log.
+}
+
+inline void MemcpyUnchecked(void *to_data, const u32 from_address, const u32 len)
+{
+	memcpy(to_data, GetPointerUnchecked(from_address), len);
+}
+
 
 template<class T>
 void ReadStruct(u32 address, T *ptr)
 {
 	size_t sz = sizeof(*ptr);
-  memcpy(ptr, GetPointer(address), sz);
+	memcpy(ptr, GetPointer(address), sz);
 }
 
 template<class T>
 void WriteStruct(u32 address, T *ptr)
 {
 	size_t sz = sizeof(*ptr);
-  memcpy(GetPointer(address), ptr, sz);
+	memcpy(GetPointer(address), ptr, sz);
+}
+
+// Expect this to be some form of auto class on big endian.
+template<class T>
+T *GetStruct(u32 address)
+{
+	return (T *)GetPointer(address);
 }
 
 const char *GetAddressName(u32 address);
 
 };
 
-#endif
+template <typename T>
+struct PSPPointer
+{
+	u32_le ptr;
 
+	inline T &operator*() const
+	{
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
+		return *(T *)(Memory::base + (ptr & Memory::MEMVIEW32_MASK));
+#else
+		return *(T *)(Memory::base + ptr);
+#endif
+	}
+
+	inline T &operator[](int i) const
+	{
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
+		return *((T *)(Memory::base + (ptr & Memory::MEMVIEW32_MASK)) + i);
+#else
+		return *((T *)(Memory::base + ptr) + i);
+#endif
+	}
+
+	inline T *operator->() const
+	{
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
+		return (T *)(Memory::base + (ptr & Memory::MEMVIEW32_MASK));
+#else
+		return (T *)(Memory::base + ptr);
+#endif
+	}
+
+	inline PSPPointer<T> operator+(int i) const
+	{
+		PSPPointer other;
+		other.ptr = ptr + i * sizeof(T);
+		return other;
+	}
+
+	inline PSPPointer<T> &operator=(u32 p)
+	{
+		ptr = p;
+		return *this;
+	}
+
+	inline PSPPointer<T> &operator+=(int i)
+	{
+		ptr = ptr + i * sizeof(T);
+		return *this;
+	}
+
+	inline PSPPointer<T> operator-(int i) const
+	{
+		PSPPointer other;
+		other.ptr = ptr - i * sizeof(T);
+		return other;
+	}
+
+	inline PSPPointer<T> &operator-=(int i)
+	{
+		ptr = ptr - i * sizeof(T);
+		return *this;
+	}
+
+	inline PSPPointer<T> &operator++()
+	{
+		ptr += sizeof(T);
+		return *this;
+	}
+
+	inline PSPPointer<T> operator++(int i)
+	{
+		PSPPointer<T> other;
+		other.ptr = ptr;
+		ptr += sizeof(T);
+		return other;
+	}
+
+	inline PSPPointer<T> &operator--()
+	{
+		ptr -= sizeof(T);
+		return *this;
+	}
+
+	inline PSPPointer<T> operator--(int i)
+	{
+		PSPPointer<T> other;
+		other.ptr = ptr;
+		ptr -= sizeof(T);
+		return other;
+	}
+
+	inline operator T*()
+	{
+#if defined(_M_IX86) || defined(_M_ARM32) || defined (_XBOX)
+		return (T *)(Memory::base + (ptr & Memory::MEMVIEW32_MASK));
+#else
+		return (T *)(Memory::base + ptr);
+#endif
+	}
+
+	bool IsValid() const
+	{
+		return Memory::IsValidAddress(ptr);
+	}
+};
+
+
+inline u32 PSP_GetScratchpadMemoryBase() { return 0x00010000;}
+inline u32 PSP_GetScratchpadMemoryEnd() { return 0x00014000;}
+
+inline u32 PSP_GetKernelMemoryBase() { return 0x08000000;}
+inline u32 PSP_GetUserMemoryEnd()  { return PSP_GetKernelMemoryBase() + Memory::g_MemorySize;}
+inline u32 PSP_GetKernelMemoryEnd()  { return 0x08400000;} 
+// "Volatile" RAM is between 0x08400000 and 0x08800000, can be requested by the
+// game through sceKernelVolatileMemTryLock.
+
+inline u32 PSP_GetUserMemoryBase() { return 0x08800000;}
+
+inline u32 PSP_GetDefaultLoadAddress() { return 0x08804000;}
+//inline u32 PSP_GetDefaultLoadAddress() { return 0x0898dab0;}
+inline u32 PSP_GetVidMemBase() { return 0x04000000;}
+inline u32 PSP_GetVidMemEnd() { return 0x04800000;}
+
+template <typename T>
+inline bool operator==(const PSPPointer<T> &lhs, const PSPPointer<T> &rhs)
+{
+	return lhs.ptr == rhs.ptr;
+}
+
+template <typename T>
+inline bool operator!=(const PSPPointer<T> &lhs, const PSPPointer<T> &rhs)
+{
+	return lhs.ptr != rhs.ptr;
+}
+
+template <typename T>
+inline bool operator<(const PSPPointer<T> &lhs, const PSPPointer<T> &rhs)
+{
+	return lhs.ptr < rhs.ptr;
+}
+
+template <typename T>
+inline bool operator>(const PSPPointer<T> &lhs, const PSPPointer<T> &rhs)
+{
+	return lhs.ptr > rhs.ptr;
+}
+
+template <typename T>
+inline bool operator<=(const PSPPointer<T> &lhs, const PSPPointer<T> &rhs)
+{
+	return lhs.ptr <= rhs.ptr;
+}
+
+template <typename T>
+inline bool operator>=(const PSPPointer<T> &lhs, const PSPPointer<T> &rhs)
+{
+	return lhs.ptr >= rhs.ptr;
+}

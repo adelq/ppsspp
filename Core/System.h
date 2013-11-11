@@ -18,17 +18,73 @@
 #pragma once
 
 #include "../Globals.h"
-#include "MemMap.h"
-#include "FileSystems/MetaFileSystem.h"
-#include "CoreParameter.h"
-#include "ELF/ParamSFO.h"
+#include "Core/MemMap.h"
+#include "Core/Host.h"
+#include "Core/FileSystems/MetaFileSystem.h"
+#include "Core/CoreParameter.h"
+#include "Core/ELF/ParamSFO.h"
 
 extern MetaFileSystem pspFileSystem;
 extern ParamSFOData g_paramSFO;
 
+
+// To synchronize the two UIs, we need to know which state we're in.
+enum GlobalUIState {
+	UISTATE_MENU,
+	UISTATE_PAUSEMENU,
+	UISTATE_INGAME,
+	UISTATE_EXIT,
+};
+
+// Use these in conjunction with GetSysDirectory.
+enum PSPDirectories {
+	DIRECTORY_CHEATS,
+	DIRECTORY_SCREENSHOT,
+	DIRECTORY_SYSTEM,
+	DIRECTORY_GAME,
+	DIRECTORY_SAVEDATA,
+	DIRECTORY_PAUTH,
+};
+
+extern GlobalUIState globalUIState;
+
+inline static void UpdateUIState(GlobalUIState newState) {
+	// Never leave the EXIT state.
+	if (globalUIState != newState && globalUIState != UISTATE_EXIT) {
+		globalUIState = newState;
+		host->UpdateDisassembly();
+	}
+}
+
 bool PSP_Init(const CoreParameter &coreParam, std::string *error_string);
 bool PSP_IsInited();
 void PSP_Shutdown();
-void PSP_HWAdvance(int cycles);
-void PSP_SWI();
+void PSP_RunLoopUntil(u64 globalticks);
+void PSP_RunLoopFor(int cycles);
+
+void Audio_Init();
+
+bool IsOnSeparateCPUThread();
+bool IsAudioInitialised();
+
+std::string GetSysDirectory(PSPDirectories directoryType);
+#ifdef _WIN32
+void InitSysDirectories();
+#endif
+
+// RUNNING must be at 0, NEXTFRAME must be at 1.
+enum CoreState
+{
+	CORE_RUNNING = 0,
+	CORE_NEXTFRAME = 1,
+	CORE_STEPPING,
+	CORE_POWERUP,
+	CORE_POWERDOWN,
+	CORE_ERROR,
+};
+
+extern volatile CoreState coreState;
+extern volatile bool coreStatePending;
+void Core_UpdateState(CoreState newState);
+
 CoreParameter &PSP_CoreParameter();

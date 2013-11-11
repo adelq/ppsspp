@@ -15,20 +15,21 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
+#include "math/math_util.h"
+
 #include "ABI.h"
 #include "x64Emitter.h"
 
-#include "../../MemMap.h"
+#include "Core/Core.h"
+#include "Core/MemMap.h"
+#include "Core/System.h"
+#include "Core/MIPS/MIPS.h"
+#include "Core/CoreTiming.h"
+#include "Common/MemoryUtil.h"
 
-#include "../MIPS.h"
-#include "../../CoreTiming.h"
-#include "MemoryUtil.h"
-
-#include "ABI.h"
-#include "Jit.h"
-#include "../JitCommon/JitCommon.h"
-#include "../../Core.h"
-#include "Asm.h"
+#include "Core/MIPS/JitCommon/JitCommon.h"
+#include "Core/MIPS/x86/Asm.h"
+#include "Core/MIPS/x86/Jit.h"
 
 using namespace Gen;
 
@@ -72,7 +73,7 @@ void AsmRoutineManager::Generate(MIPSState *mips, MIPSComp::Jit *jit)
 #ifdef _M_X64
 	// Two statically allocated registers.
 	MOV(64, R(RBX), Imm64((u64)Memory::base));
-	MOV(64, R(R15), Imm64((u64)jit->GetBlockCache()->GetCodePointers())); //It's below 2GB so 32 bits are good enough
+	MOV(64, R(R15), Imm64((u64)jit->GetBasePtr())); //It's below 2GB so 32 bits are good enough
 #endif
 
 	outerLoop = GetCodePtr();
@@ -81,11 +82,16 @@ void AsmRoutineManager::Generate(MIPSState *mips, MIPSComp::Jit *jit)
 
 		dispatcherCheckCoreState = GetCodePtr();
 
+		// The result of slice decrementation should be in flags if somebody jumped here
+		// IMPORTANT - We jump on negative, not carry!!!
+		FixupBranch bailCoreState = J_CC(CC_S, true);
+
 		CMP(32, M((void*)&coreState), Imm32(0));
 		FixupBranch badCoreState = J_CC(CC_NZ, true);
 		FixupBranch skipToRealDispatch2 = J(); //skip the sync and compare first time
 
 		dispatcher = GetCodePtr();
+
 			// The result of slice decrementation should be in flags if somebody jumped here
 			// IMPORTANT - We jump on negative, not carry!!!
 			FixupBranch bail = J_CC(CC_S, true);
@@ -99,8 +105,7 @@ void AsmRoutineManager::Generate(MIPSState *mips, MIPSComp::Jit *jit)
 #ifdef _M_IX86
 			AND(32, R(EAX), Imm32(Memory::MEMVIEW32_MASK));
 			_assert_msg_(CPU, Memory::base != 0, "Memory base bogus");
-			MOV(32, R(EDX), Imm32((u32)Memory::base));
-			MOV(32, R(EAX), MComplex(EDX, EAX, SCALE_1, 0));
+			MOV(32, R(EAX), MDisp(EAX, (u32)Memory::base));
 #elif _M_X64
 			MOV(32, R(EAX), MComplex(RBX, RAX, SCALE_1, 0));
 #endif
@@ -114,27 +119,21 @@ void AsmRoutineManager::Generate(MIPSState *mips, MIPSComp::Jit *jit)
 					ADD(32, M(&mips->debugCount), Imm8(1));
 				}
 				//grab from list and jump to it
+				AND(32, R(EAX), Imm32(MIPS_EMUHACK_VALUE_MASK));
 #ifdef _M_IX86
-				AND(32, R(EAX), Imm32(MIPS_EMUHACK_VALUE_MASK));
-				MOV(32, R(EDX), ImmPtr(jit->GetBlockCache()->GetCodePointers()));
-				JMPptr(MComplex(EDX, EAX, 4, 0));
+				ADD(32, R(EAX), ImmPtr(jit->GetBasePtr()));
 #elif _M_X64
-				AND(32, R(EAX), Imm32(MIPS_EMUHACK_VALUE_MASK));
-				JMPptr(MComplex(R15, RAX, 8, 0));
+				ADD(64, R(RAX), R(R15));
 #endif
+				JMPptr(R(EAX));
 			SetJumpTarget(notfound);
 
 			//Ok, no block, let's jit
-#ifdef _M_IX86
-			ABI_AlignStack(0);
-			CALL(reinterpret_cast<void *>(&Jit));
-			ABI_RestoreStack(0);
-#elif _M_X64
-			CALL((void *)&Jit);
-#endif
+			ABI_CallFunction((void *)&Jit);
 			JMP(dispatcherNoCheck); // Let's just dispatch again, we'll enter the block since we know it's there.
 
 		SetJumpTarget(bail);
+		SetJumpTarget(bailCoreState);
 
 		CMP(32, M((void*)&coreState), Imm32(0));
 		J_CC(CC_Z, outerLoop, true);

@@ -15,7 +15,9 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#pragma once 
+#pragma once
+
+#include "Common/Common.h"
 
 ///////////////////////
 // ELF Header Constants
@@ -196,11 +198,11 @@ enum ElfSectionFlags
 #define DT_LOPROC   0x70000000
 #define DT_HIPROC   0x7FFFFFFF
 
-typedef u32  Elf32_Addr;
-typedef u16 Elf32_Half;
-typedef u32 Elf32_Off;
-typedef s32 Elf32_Sword;
-typedef u32 Elf32_Word;
+typedef u32_le Elf32_Addr;
+typedef u16_le Elf32_Half;
+typedef u32_le Elf32_Off;
+typedef s32_le Elf32_Sword;
+typedef u32_le Elf32_Word;
 
 
 // ELF file header
@@ -283,7 +285,7 @@ struct Elf32_Rela
 #define ELF32_R_TYPE(i) ((unsigned char)(i))
 #define ELF32_R_INFO(s,t) (((s)<<8 )+(unsigned char)(t))
 
-
+/*
 struct Elf32_Dyn 
 {
 	Elf32_Sword d_tag;
@@ -293,3 +295,4 @@ struct Elf32_Dyn
         Elf32_Addr d_ptr;
     } d_un;
 };
+*/

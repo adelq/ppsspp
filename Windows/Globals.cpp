@@ -18,12 +18,12 @@
 
 #include "Globals.h"
 #include "MsgHandler.h"
-#include "IniFile.h"
 
 #ifdef _WIN32
-#include <windows.h>
+#include "Common/CommonWindows.h"
 
 // Globals
 HMENU g_hPopupMenus;
+int g_activeWindow = 0;
 #endif
 

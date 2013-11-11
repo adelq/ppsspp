@@ -17,31 +17,29 @@
 
 #pragma once
 
-#include "../Globals.h"
-#include "CoreParameter.h"
+#include "Globals.h"
+#include "Core/System.h"
+#include "Core/CoreParameter.h"
 
 // called from emu thread
 void Core_Run();
-void Core_Pause();
 void Core_Stop();
 void Core_ErrorPause();
 // called from gui
 void Core_EnableStepping(bool step);
 void Core_DoSingleStep();
+void Core_UpdateSingleStep();
 
+typedef void (* Core_ShutdownFunc)();
+void Core_ListenShutdown(Core_ShutdownFunc func);
+void Core_NotifyShutdown();
 void Core_Halt(const char *msg);
 
 bool Core_IsStepping();
 
-// RUNNING must be at 0.
-enum CoreState
-{
-	CORE_RUNNING = 0,
-	CORE_STEPPING,
-	CORE_POWERDOWN,
-	CORE_ERROR,
-	CORE_NEXTFRAME,
-};
+bool Core_IsActive();
+bool Core_IsInactive();
+void Core_WaitInactive();
+void Core_WaitInactive(int milliseconds);
 
-
-extern volatile CoreState coreState;
+void UpdateScreenScale();

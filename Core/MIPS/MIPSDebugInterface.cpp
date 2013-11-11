@@ -26,6 +26,86 @@
 #include "../MIPS/MIPS.h"
 #include "../System.h"
 
+
+class MipsExpressionFunctions: public IExpressionFunctions
+{
+public:
+	MipsExpressionFunctions(DebugInterface* cpu): cpu(cpu) { };
+
+	virtual bool parseReference(char* str, uint32& referenceIndex)
+	{
+		for (int i = 0; i < 32; i++)
+		{
+			char reg[8];
+			sprintf(reg,"r%d",i);
+
+			if (strcasecmp(str,reg) == 0 || strcasecmp(str,cpu->GetRegName(0,i)) == 0)
+			{
+				referenceIndex = i;
+				return true;
+			}
+		}
+
+		if (strcasecmp(str,"pc") == 0)
+		{
+			referenceIndex = 32;
+			return true;
+		} 
+
+		return false;
+	}
+
+	virtual bool parseSymbol(char* str, uint32& symbolValue)
+	{
+		return cpu->getSymbolValue(str,symbolValue); 
+	}
+
+	virtual uint32 getReferenceValue(uint32 referenceIndex)
+	{
+		if (referenceIndex < 32) return cpu->GetRegValue(0,referenceIndex);
+		if (referenceIndex == 32) return cpu->GetPC();
+		return -1;
+	}
+	
+	virtual bool getMemoryValue(uint32 address, int size, uint32& dest, char* error)
+	{
+		switch (size)
+		{
+		case 1: case 2: case 4:
+			break;
+		default:
+			sprintf(error,"Invalid memory access size %d",size);
+			return false;
+		}
+
+		if (address % size)
+		{
+			sprintf(error,"Invalid memory access (unaligned)");
+			return false;
+		}
+
+		switch (size)
+		{
+		case 1:
+			dest = Memory::Read_U8(address);
+			break;
+		case 2:
+			dest = Memory::Read_U16(address);
+			break;
+		case 4:
+			dest = Memory::Read_U32(address);
+			break;
+		}
+
+		return true;
+	}
+
+private:
+	DebugInterface* cpu;
+};
+
+
+
 const char *MIPSDebugInterface::disasm(unsigned int address, unsigned int align) 
 {
 	MIPSState *x = currentCPU;
@@ -41,12 +121,12 @@ const char *MIPSDebugInterface::disasm(unsigned int address, unsigned int align)
 }
 unsigned int MIPSDebugInterface::readMemory(unsigned int address)
 {
-	return Memory::Read_U32(address);
+	return Memory::Read_Instruction(address).encoding;
 }
 
 bool MIPSDebugInterface::isAlive()
 {
-	return PSP_IsInited();
+	return PSP_IsInited() && coreState != CORE_ERROR && coreState != CORE_POWERDOWN;
 }
 
 bool MIPSDebugInterface::isBreakpoint(unsigned int address) 
@@ -73,12 +153,34 @@ int MIPSDebugInterface::getColor(unsigned int address)
 {
 	int colors[6] = {0xe0FFFF,0xFFe0e0,0xe8e8FF,0xFFe0FF,0xe0FFe0,0xFFFFe0};
 	int n=symbolMap.GetSymbolNum(address);
-	if (n==-1) return 0xFFFFFF;
+	if (n==-1 || symbolMap.GetSymbolSize(n) < 4) return 0xFFFFFF;
 	return colors[n%6];
 }
 const char *MIPSDebugInterface::getDescription(unsigned int address) 
 {
 	return symbolMap.GetDescription(address);
+}
+
+const char *MIPSDebugInterface::findSymbolForAddress(unsigned int address)
+{
+	return symbolMap.getDirectSymbol(address);
+}
+
+bool MIPSDebugInterface::getSymbolValue(char* symbol, u32& dest)
+{
+	return symbolMap.getSymbolValue(symbol,dest);
+}
+
+bool MIPSDebugInterface::initExpression(const char* exp, PostfixExpression& dest)
+{
+	MipsExpressionFunctions funcs(this);
+	return initPostfixExpression(exp,&funcs,dest);
+}
+
+bool MIPSDebugInterface::parseExpression(PostfixExpression& exp, u32& dest)
+{
+	MipsExpressionFunctions funcs(this);
+	return parsePostfixExpression(exp,&funcs,dest);
 }
 
 void MIPSDebugInterface::runToBreakpoint() 

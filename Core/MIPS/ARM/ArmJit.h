@@ -18,132 +18,203 @@
 #pragma once
 
 #include "../../../Globals.h"
-#include "ArmAsm.h"
 
-#include <ArmEmitter.h>
-#include "ArmJitCache.h"
-#include "ArmRegCache.h"
+#include "Core/MIPS/JitCommon/JitState.h"
+#include "Core/MIPS/JitCommon/JitBlockCache.h"
+#include "Core/MIPS/ARM/ArmRegCache.h"
+#include "Core/MIPS/ARM/ArmRegCacheFPU.h"
+#include "Core/MIPS/ARM/ArmAsm.h"
+
+#if defined(MAEMO)
+#include "stddef.h"
+#endif
 
 namespace MIPSComp
 {
 
 struct ArmJitOptions
 {
-	ArmJitOptions()
-	{
-		enableBlocklink = true;
-	}
+	ArmJitOptions();
 
 	bool enableBlocklink;
-};
-
-struct ArmJitState
-{
-	u32 compilerPC;
-	u32 blockStart;
-	bool cancel;
-	bool inDelaySlot;
-	int downcountAmount;
-	bool compiling;	// TODO: get rid of this in favor of using analysis results to determine end of block
-	ArmJitBlock *curBlock;
+	bool downcountInRegister;
+	bool useBackJump;
+	bool useForwardJump;
+	bool cachePointers;
+	bool immBranches;
+	bool continueBranches;
+	bool continueJumps;
+	int continueMaxInstructions;
 };
 
 class Jit : public ArmGen::ARMXCodeBlock
 {
 public:
 	Jit(MIPSState *mips);
+	void DoState(PointerWrap &p);
+	static void DoDummyState(PointerWrap &p);
 
 	// Compiled ops should ignore delay slots
 	// the compiler will take care of them by itself
 	// OR NOT
-	void Comp_Generic(u32 op);
+	void Comp_Generic(MIPSOpcode op);
 
 	void RunLoopUntil(u64 globalticks);
 
 	void Compile(u32 em_address);	// Compiles a block at current MIPS PC
-	const u8 *DoJit(u32 em_address, ArmJitBlock *b);
+	const u8 *DoJit(u32 em_address, JitBlock *b);
 
+	void CompileDelaySlot(int flags);
 	void CompileAt(u32 addr);
-	void Comp_RunBlock(u32 op);
+	void EatInstruction(MIPSOpcode op);
+	void Comp_RunBlock(MIPSOpcode op);
 
 	// Ops
-	void Comp_ITypeMem(u32 op);
+	void Comp_ITypeMem(MIPSOpcode op);
+	void Comp_Cache(MIPSOpcode op);
 
-	void Comp_RelBranch(u32 op);
-	void Comp_RelBranchRI(u32 op);
-	void Comp_FPUBranch(u32 op);
-	void Comp_FPULS(u32 op);
-	void Comp_Jump(u32 op);
-	void Comp_JumpReg(u32 op);
-	void Comp_Syscall(u32 op);
+	void Comp_RelBranch(MIPSOpcode op);
+	void Comp_RelBranchRI(MIPSOpcode op);
+	void Comp_FPUBranch(MIPSOpcode op);
+	void Comp_FPULS(MIPSOpcode op);
+	void Comp_FPUComp(MIPSOpcode op);
+	void Comp_Jump(MIPSOpcode op);
+	void Comp_JumpReg(MIPSOpcode op);
+	void Comp_Syscall(MIPSOpcode op);
+	void Comp_Break(MIPSOpcode op);
 
-	void Comp_IType(u32 op);
-	void Comp_RType3(u32 op);
-	void Comp_ShiftType(u32 op);
-	void Comp_Allegrex(u32 op);
-	void Comp_VBranch(u32 op);
+	void Comp_IType(MIPSOpcode op);
+	void Comp_RType2(MIPSOpcode op);
+	void Comp_RType3(MIPSOpcode op);
+	void Comp_ShiftType(MIPSOpcode op);
+	void Comp_Allegrex(MIPSOpcode op);
+	void Comp_Allegrex2(MIPSOpcode op);
+	void Comp_VBranch(MIPSOpcode op);
+	void Comp_MulDivType(MIPSOpcode op);
+	void Comp_Special3(MIPSOpcode op);
 
-	void Comp_FPU3op(u32 op);
-	void Comp_FPU2op(u32 op);
-	void Comp_mxc1(u32 op);
+	void Comp_FPU3op(MIPSOpcode op);
+	void Comp_FPU2op(MIPSOpcode op);
+	void Comp_mxc1(MIPSOpcode op);
 
-	ArmJitBlockCache *GetBlockCache() { return &blocks; }
+	void Comp_DoNothing(MIPSOpcode op);
+
+	void Comp_SV(MIPSOpcode op);
+	void Comp_SVQ(MIPSOpcode op);
+	void Comp_VPFX(MIPSOpcode op);
+	void Comp_VVectorInit(MIPSOpcode op);
+	void Comp_VMatrixInit(MIPSOpcode op);
+	void Comp_VDot(MIPSOpcode op);
+	void Comp_VecDo3(MIPSOpcode op);
+	void Comp_VV2Op(MIPSOpcode op);
+	void Comp_Mftv(MIPSOpcode op);
+	void Comp_Vmtvc(MIPSOpcode op);
+	void Comp_Vmmov(MIPSOpcode op);
+	void Comp_VScl(MIPSOpcode op);
+	void Comp_Vmmul(MIPSOpcode op);
+	void Comp_Vmscl(MIPSOpcode op);
+	void Comp_Vtfm(MIPSOpcode op);
+	void Comp_VHdp(MIPSOpcode op);
+	void Comp_VCrs(MIPSOpcode op);
+	void Comp_VDet(MIPSOpcode op);
+	void Comp_Vi2x(MIPSOpcode op);
+	void Comp_Vx2i(MIPSOpcode op);
+	void Comp_Vf2i(MIPSOpcode op);
+	void Comp_Vi2f(MIPSOpcode op);
+	void Comp_Vh2f(MIPSOpcode op);
+	void Comp_Vcst(MIPSOpcode op);
+	void Comp_Vhoriz(MIPSOpcode op);
+	void Comp_VRot(MIPSOpcode op);
+	void Comp_VIdt(MIPSOpcode op);
+	void Comp_Vcmp(MIPSOpcode op);
+	void Comp_Vcmov(MIPSOpcode op);
+	void Comp_Viim(MIPSOpcode op);
+	void Comp_Vfim(MIPSOpcode op);
+	void Comp_VCrossQuat(MIPSOpcode op);
+	void Comp_Vsgn(MIPSOpcode op);
+
+	JitBlockCache *GetBlockCache() { return &blocks; }
 
 	void ClearCache();
+	void ClearCacheAt(u32 em_address, int length = 4);
+
+	void EatPrefix() { js.EatPrefix(); }
 
 private:
 	void GenerateFixedCode();
 	void FlushAll();
+	void FlushPrefixV();
 
-	// TODO: Split into two parts, the first part can be shared in branches.
-	void DoDownCount();
+	void WriteDownCount(int offset = 0);
 	void MovFromPC(ARMReg r);
 	void MovToPC(ARMReg r);
+
+	void SaveDowncount();
+	void RestoreDowncount();
 
 	void WriteExit(u32 destination, int exit_num);
 	void WriteExitDestInR(ARMReg Reg);
 	void WriteSyscallExit();
 
 	// Utility compilation functions
-	void BranchFPFlag(u32 op, ArmGen::CCFlags cc, bool likely);
-	void BranchVFPUFlag(u32 op, ArmGen::CCFlags cc, bool likely);
-	void BranchRSZeroComp(u32 op, ArmGen::CCFlags cc, bool likely);
-	void BranchRSRTComp(u32 op, ArmGen::CCFlags cc, bool likely);
+	void BranchFPFlag(MIPSOpcode op, ArmGen::CCFlags cc, bool likely);
+	void BranchVFPUFlag(MIPSOpcode op, ArmGen::CCFlags cc, bool likely);
+	void BranchRSZeroComp(MIPSOpcode op, ArmGen::CCFlags cc, bool andLink, bool likely);
+	void BranchRSRTComp(MIPSOpcode op, ArmGen::CCFlags cc, bool likely);
 
 	// Utilities to reduce duplicated code
-	void CompImmLogic(int rs, int rt, u32 uimm, void (ARMXEmitter::*arith)(ARMReg dst, ARMReg src, Operand2 op2), u32 (*eval)(u32 a, u32 b));
-	void CompShiftImm(u32 op, ArmGen::ShiftType shiftType);
-		/*
-	void CompImmLogic(u32 op, void (ARMXEmitter::*arith)(int, const OpArg &, const OpArg &));
-	void CompTriArith(u32 op, void (ARMXEmitter::*arith)(int, const OpArg &, const OpArg &));
-	void CompShiftImm(u32 op, void (ARMXEmitter::*shift)(int, OpArg, OpArg));
-	void CompShiftVar(u32 op, void (XEmitter::*shift)(int, OpArg, OpArg));
+	void CompImmLogic(MIPSGPReg rs, MIPSGPReg rt, u32 uimm, void (ARMXEmitter::*arith)(ARMReg dst, ARMReg src, Operand2 op2), u32 (*eval)(u32 a, u32 b));
+	void CompType3(MIPSGPReg rd, MIPSGPReg rs, MIPSGPReg rt, void (ARMXEmitter::*arithOp2)(ARMReg dst, ARMReg rm, Operand2 rn), u32 (*eval)(u32 a, u32 b), bool symmetric = false, bool useMOV = false);
 
-	void CompFPTriArith(u32 op, void (XEmitter::*arith)(X64Reg reg, OpArg), bool orderMatters);
-	*/
+	void CompShiftImm(MIPSOpcode op, ArmGen::ShiftType shiftType, int sa);
+	void CompShiftVar(MIPSOpcode op, ArmGen::ShiftType shiftType);
 
-	ArmJitBlockCache blocks;
+	void ApplyPrefixST(u8 *vregs, u32 prefix, VectorSize sz);
+	void ApplyPrefixD(const u8 *vregs, VectorSize sz);
+	void GetVectorRegsPrefixS(u8 *regs, VectorSize sz, int vectorReg) {
+		_assert_(js.prefixSFlag & JitState::PREFIX_KNOWN);
+		GetVectorRegs(regs, sz, vectorReg);
+		ApplyPrefixST(regs, js.prefixS, sz);
+	}
+	void GetVectorRegsPrefixT(u8 *regs, VectorSize sz, int vectorReg) {
+		_assert_(js.prefixTFlag & JitState::PREFIX_KNOWN);
+		GetVectorRegs(regs, sz, vectorReg);
+		ApplyPrefixST(regs, js.prefixT, sz);
+	}
+	void GetVectorRegsPrefixD(u8 *regs, VectorSize sz, int vectorReg);
+
+	// Utils
+	void SetR0ToEffectiveAddress(MIPSGPReg rs, s16 offset);
+	void SetCCAndR0ForSafeAddress(MIPSGPReg rs, s16 offset, ARMReg tempReg, bool reverse = false);
+	void Comp_ITypeMemLR(MIPSOpcode op, bool load);
+
+	JitBlockCache blocks;
 	ArmJitOptions jo;
-	ArmJitState js;
+	JitState js;
 
 	ArmRegCache gpr;
-	// FPURegCache fpr;
+	ArmRegCacheFPU fpr;
 
 	MIPSState *mips_;
+
+	int dontLogBlocks;
+	int logBlocks;
 
 public:
 	// Code pointers
 	const u8 *enterCode;
 
 	const u8 *outerLoop;
+	const u8 *outerLoopPCInR0;
 	const u8 *dispatcherCheckCoreState;
+	const u8 *dispatcherPCInR0;
 	const u8 *dispatcher;
 	const u8 *dispatcherNoCheck;
 
 	const u8 *breakpointBailout;
 };
 
-typedef void (Jit::*MIPSCompileFunc)(u32 opcode);
+typedef void (Jit::*MIPSCompileFunc)(MIPSOpcode opcode);
 
 }	// namespace MIPSComp
 

@@ -17,7 +17,8 @@
 
 #include "HLE.h"
 #include "../MIPS/MIPS.h"
-#include "../../Core/CoreTiming.h"
+#include "Core/CoreTiming.h"
+#include "ChunkFile.h"
 #include "sceUsb.h"
 
 bool usbActivated = false;
@@ -29,8 +30,11 @@ void __UsbInit()
 
 void __UsbDoState(PointerWrap &p)
 {
+	auto s = p.Section("sceUsb", 1);
+	if (!s)
+		return;
+
 	p.Do(usbActivated);
-	p.DoMarker("sceUsb");
 }
 
 u32 sceUsbActivate() {
@@ -49,6 +53,7 @@ const HLEFunction sceUsb[] =
 	{0x586db82c, WrapU_V<sceUsbActivate>, "sceUsbActivate"},
 	{0xc572a9c8, 0, "sceUsbDeactivate"},
 	{0x5be0e002, 0, "sceUsbWaitState"},
+	{0x616f2b61, 0, "sceUsbWaitStateCB"},
 	{0x1c360735, 0, "sceUsbWaitCancel"},
 };
 

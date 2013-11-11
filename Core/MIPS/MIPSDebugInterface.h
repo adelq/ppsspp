@@ -40,6 +40,10 @@ public:
 	virtual void runToBreakpoint();
 	virtual int getColor(unsigned int address);
 	virtual const char *getDescription(unsigned int address);
+	virtual const char *findSymbolForAddress(unsigned int address);
+	virtual bool getSymbolValue(char* symbol, u32& dest);
+	virtual bool initExpression(const char* exp, PostfixExpression& dest);
+	virtual bool parseExpression(PostfixExpression& exp, u32& dest);
 
 	//overridden functions
 	const char *GetName();
@@ -66,15 +70,70 @@ public:
 	{
 		switch (cat)
 		{
-		case 0:	sprintf(out, "%08x", cpu->r[index]); break;
+		case 0:	sprintf(out, "%08X", cpu->r[index]); break;
 		case 1:	sprintf(out, "%f", cpu->f[index]); break;
 		case 2:	sprintf(out, "N/A"); break;
 		}
 	}
 
-	u32 GetRegValue(int cat, int index)
+	u32 GetHi()
 	{
-		return cpu->r[index];
+		return cpu->hi;
 	}
 
+	u32 GetLo()
+	{
+		return cpu->lo;
+	}
+	
+	void SetHi(u32 val)
+	{
+		cpu->hi = val;
+	}
+
+	void SetLo(u32 val)
+	{
+		cpu->lo = val;
+	}
+
+	u32 GetRegValue(int cat, int index)
+	{
+		u32 temp;
+		switch (cat)
+		{
+		case 0:
+			return cpu->r[index];
+		case 1:
+			memcpy(&temp, &cpu->f[index], 4);
+			return temp;
+
+		case 2:
+			memcpy(&temp, &cpu->v[index], 4);
+			return temp;
+
+		default:
+			return 0;
+		}
+	}
+
+	void SetRegValue(int cat, int index, u32 value)
+	{
+		switch (cat)
+		{
+		case 0:
+			cpu->r[index] = value;
+			break;
+
+		case 1:
+			memcpy(&cpu->f[index], &value, 4);
+			break;
+
+		case 2:
+			memcpy(&cpu->v[index], &value, 4);
+			break;
+
+		default:
+			break;
+		}
+	}
 };

@@ -19,6 +19,8 @@
 
 #include "Globals.h"
 
+// #define USE_BONE_ARRAY
+
 struct VertexShaderID
 {
 	VertexShaderID() {d[0] = 0xFFFFFFFF;}
@@ -48,6 +50,8 @@ struct VertexShaderID
 
 bool CanUseHardwareTransform(int prim);
 
-void ComputeVertexShaderID(VertexShaderID *id, int prim);
+void ComputeVertexShaderID(VertexShaderID *id, u32 vertexType, int prim, bool useHWTransform);
+void GenerateVertexShader(int prim, u32 vertexType, char *buffer, bool useHWTransform);
 
-void GenerateVertexShader(int prim, char *buffer);
+// Collapse to less skinning shaders to reduce shader switching, which is expensive.
+int TranslateNumBones(int bones);

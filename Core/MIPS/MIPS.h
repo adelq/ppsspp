@@ -17,11 +17,14 @@
 
 #pragma once
 
-#include "../../Globals.h"
-#include "../../Common/ChunkFile.h"
-#include "../CPU.h"
+#include "Globals.h"
+#include "Core/MemMap.h"
+#include "Core/CPU.h"
+#include "util/random/rng.h"
 
-enum
+typedef Memory::Opcode MIPSOpcode;
+
+enum MIPSGPReg
 {
 	MIPS_REG_ZERO=0,
 	MIPS_REG_COMPILER_SCRATCH=1,
@@ -36,6 +39,11 @@ enum
 	MIPS_REG_A4=8,	// Seems to be N32 register calling convention - there are 8 args instead of 4.
 	MIPS_REG_A5=9,
 
+	MIPS_REG_T4=12,
+	MIPS_REG_T5=13,
+	MIPS_REG_T6=14,
+	MIPS_REG_T7=15,
+
 	MIPS_REG_S0=16,
 	MIPS_REG_S1=17,
 	MIPS_REG_S2=18,
@@ -44,6 +52,8 @@ enum
 	MIPS_REG_S5=21,
 	MIPS_REG_S6=22,
 	MIPS_REG_S7=23,
+	MIPS_REG_T8=24,
+	MIPS_REG_T9=25,
 	MIPS_REG_K0=26,
 	MIPS_REG_K1=27,
 	MIPS_REG_GP=28,
@@ -53,6 +63,11 @@ enum
 
 	// ID for mipscall "callback" is stored here - from JPCSP
 	MIPS_REG_CALL_ID=MIPS_REG_S0,
+	MIPS_REG_INVALID=-1,
+
+	// Not real regs, just for convenience/jit mapping.
+	MIPS_REG_HI = 32,
+	MIPS_REG_LO = 33,
 };
 
 enum
@@ -78,30 +93,24 @@ enum
 	//unknown....
 };
 
-// George Marsaglia-style random number generator.
-class GMRng {
-public:
-	void Init(int seed) {
-		m_w = seed ^ (seed << 16);
-		if (!m_w) m_w = 1337;
-		m_z = ~seed;
-		if (!m_z) m_z = 31337;
-	}
-	u32 R32() {
-		m_z = 36969 * (m_z & 65535) + (m_z >> 16);
-		m_w = 18000 * (m_w & 65535) + (m_w >> 16);
-		return (m_z << 16) + m_w;
-	}
-
-	void DoState(PointerWrap &p) {
-		p.Do(m_w);
-		p.Do(m_z);
-		p.DoMarker("GMRng");
-	}
-
-private:
-	u32 m_w;
-	u32 m_z;
+enum VCondition
+{
+	VC_FL,
+	VC_EQ,
+	VC_LT,
+	VC_LE,
+	VC_TR,
+	VC_NE,
+	VC_GE,
+	VC_GT,
+	VC_EZ,
+	VC_EN,
+	VC_EI,
+	VC_ES,
+	VC_NZ,
+	VC_NN,
+	VC_NI,
+	VC_NS
 };
 
 class MIPSState
@@ -113,23 +122,37 @@ public:
 	void Reset();
 	void DoState(PointerWrap &p);
 
-	// MUST start with r!
+	// MUST start with r and be followed by f!
 	u32 r[32];
-	float f[32];
-	float v[128];
+	union {
+		float f[32];
+		u32 fi[32];
+		int fs[32];
+	};
+	union {
+		float v[128];
+		u32 vi[128];
+	};
+	// Temps don't get flushed so we don't reserve space for them.
+	// If vfpuCtrl (prefixes) get mysterious values, check the VFPU regcache code.
 	u32 vfpuCtrl[16];
-	bool vfpuWriteMask[4];
 
-	u32 pc;
+	union {
+		struct {
+			u32 pc;
+
+			u32 hi;
+			u32 lo;
+
+			u32 fcr0;
+			u32 fcr31; //fpu control register
+			u32 fpcond;  // cache the cond flag of fcr31  (& 1 << 23)
+		};
+		u32 other[6];
+	};
+
 	u32 nextPC;
-	u32 downcount;  // This really doesn't belong here, it belongs in CoreTiming. But you gotta do what you gotta do, this needs to be reachable in the ARM JIT.
-
-	u32 hi;
-	u32 lo;
-
-	u32 fcr0;
-	u32 fcr31; //fpu control register
-	u32 fpcond;  // cache the cond flag of fcr31  (& 1 << 23)
+	int downcount;  // This really doesn't belong here, it belongs in CoreTiming. But you gotta do what you gotta do, this needs to be reachable in the ARM JIT.
 
 	bool inDelaySlot;
 	int llBit;  // ll/sc
@@ -142,7 +165,13 @@ public:
 
 	void WriteFCR(int reg, int value);
 	u32 ReadFCR(int reg);
-	void SetWriteMask(const bool wm[4]);
+
+	u8 VfpuWriteMask() const {
+		return (vfpuCtrl[VFPU_CTRL_DPREFIX] >> 8) & 0xF;
+	}
+	bool VfpuWriteMask(int i) const {
+		return (vfpuCtrl[VFPU_CTRL_DPREFIX] >> (8 + i)) & 1;
+	}
 
 	void Irq();
 	void SWI();
@@ -150,6 +179,11 @@ public:
 
 	void SingleStep();
 	int RunLoopUntil(u64 globalTicks);
+	// To clear jit caches, etc.
+	void InvalidateICache(u32 address, int length = 4);
+
+	// for logging messages only.
+	const char *DisasmAt(u32 compilerPC);
 };
 
 
@@ -160,10 +194,6 @@ extern MIPSState *currentMIPS;
 extern MIPSDebugInterface *currentDebugMIPS;
 extern MIPSState mipsr4k;
 
-void MIPS_Init();
 int MIPS_SingleStep();
 
-void MIPS_Shutdown();
-
-void MIPS_Irq();
-void MIPS_SWI();
+extern const float cst_constants[32];

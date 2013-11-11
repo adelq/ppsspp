@@ -17,74 +17,50 @@
 
 #pragma once
 
-#include "x64Emitter.h"
-#include "../MIPSAnalyst.h"
+#include "Common/x64Emitter.h"
+#include "Core/MIPS/MIPS.h"
+#include "Core/MIPS/MIPSAnalyst.h"
+
 using namespace Gen;
-enum FlushMode
-{
-	FLUSH_ALL
-};
-
-enum GrabMode
-{
-	M_READ = 1,
-	M_WRITE = 2,
-	M_READWRITE = 3,
-};
-
-struct MIPSCachedReg
-{
-	OpArg location;
-	bool away;  // value not in source register
-};
-
-struct X64CachedReg
-{
-	int mipsReg;
-	bool dirty;
-	bool free;
-};
-
-typedef int XReg;
-typedef int PReg;
 
 #ifdef _M_X64
-#define NUMXREGS 16
+#define NUM_X_REGS 16
 #elif _M_IX86
-#define NUMXREGS 8
+#define NUM_X_REGS 8
 #endif
 
-class RegCache
+// TODO: Add more cachable regs, like HI, LO
+#define NUM_MIPS_GPRS 32
+
+struct MIPSCachedReg {
+	OpArg location;
+	bool away;  // value not in source register
+	bool locked;
+};
+
+struct X64CachedReg {
+	MIPSGPReg mipsReg;
+	bool dirty;
+	bool free;
+	bool allocLocked;
+};
+
+struct GPRRegCacheState {
+	MIPSCachedReg regs[NUM_MIPS_GPRS];
+	X64CachedReg xregs[NUM_X_REGS];
+};
+
+class GPRRegCache
 {
-private:
-	bool locks[32];
-	bool saved_locks[32];
-	bool saved_xlocks[NUMXREGS];
-
-protected:
-	bool xlocks[NUMXREGS];
-	MIPSCachedReg regs[32];
-	X64CachedReg xregs[NUMXREGS];
-
-	MIPSCachedReg saved_regs[32];
-	X64CachedReg saved_xregs[NUMXREGS];
-
-	virtual const int *GetAllocationOrder(int &count) = 0;
-	
-	XEmitter *emit;
-
 public:
-  MIPSState *mips;
-	RegCache();
+	GPRRegCache();
+	~GPRRegCache() {}
+	void Start(MIPSState *mips, MIPSAnalyst::AnalysisResults &stats);
 
-	virtual ~RegCache() {}
-	virtual void Start(MIPSState *mips, MIPSAnalyst::AnalysisResults &stats) = 0;
-
-	void DiscardRegContentsIfCached(int preg);
+	void DiscardRegContentsIfCached(MIPSGPReg preg);
 	void SetEmitter(XEmitter *emitter) {emit = emitter;}
 
 	void FlushR(X64Reg reg); 
-	void FlushR(X64Reg reg, X64Reg reg2) {FlushR(reg); FlushR(reg2);}
 	void FlushLockX(X64Reg reg) {
 		FlushR(reg);
 		LockX(reg);
@@ -93,58 +69,45 @@ public:
 		FlushR(reg1); FlushR(reg2);
 		LockX(reg1); LockX(reg2);
 	}
-	virtual void Flush(FlushMode mode);
-	// virtual void Flush(PPCAnalyst::CodeOp *op) {Flush(FLUSH_ALL);}
+	void Flush();
+	void FlushBeforeCall();
 	int SanityCheck() const;
-	void KillImmediate(int preg, bool doLoad, bool makeDirty);
+	void KillImmediate(MIPSGPReg preg, bool doLoad, bool makeDirty);
 
-	//TODO - instead of doload, use "read", "write"
-	//read only will not set dirty flag
-	virtual void BindToRegister(int preg, bool doLoad = true, bool makeDirty = true) = 0;
-	virtual void StoreFromRegister(int preg) = 0;
+	void MapReg(MIPSGPReg preg, bool doLoad = true, bool makeDirty = true);
+	void StoreFromRegister(MIPSGPReg preg);
 
-	const OpArg &R(int preg) const {return regs[preg].location;}
-	X64Reg RX(int preg) const
+	const OpArg &R(MIPSGPReg preg) const {return regs[preg].location;}
+	X64Reg RX(MIPSGPReg preg) const
 	{
 		if (regs[preg].away && regs[preg].location.IsSimpleReg()) 
 			return regs[preg].location.GetSimpleReg(); 
 		PanicAlert("Not so simple - %i", preg); 
 		return (X64Reg)-1;
 	}
-	virtual OpArg GetDefaultLocation(int reg) const = 0;
+	OpArg GetDefaultLocation(MIPSGPReg reg) const;
 
 	// Register locking.
-	void Lock(int p1, int p2=0xff, int p3=0xff, int p4=0xff);
+	void Lock(MIPSGPReg p1, MIPSGPReg p2 = MIPS_REG_INVALID, MIPSGPReg p3 = MIPS_REG_INVALID, MIPSGPReg p4 = MIPS_REG_INVALID);
 	void LockX(int x1, int x2=0xff, int x3=0xff, int x4=0xff);
 	void UnlockAll();
 	void UnlockAllX();
 
-	bool IsFreeX(int xreg) const;
+	void SetImm(MIPSGPReg preg, u32 immValue);
+	bool IsImm(MIPSGPReg preg) const;
+	u32 GetImm(MIPSGPReg preg) const;
 
+	void GetState(GPRRegCacheState &state) const;
+	void RestoreState(const GPRRegCacheState state);
+
+	MIPSState *mips;
+
+private:
 	X64Reg GetFreeXReg();
-
-	void SaveState();
-	void LoadState();
-};
-
-class GPRRegCache : public RegCache
-{
-public:
-	void Start(MIPSState *mips, MIPSAnalyst::AnalysisResults &stats);
-	void BindToRegister(int preg, bool doLoad = true, bool makeDirty = true);
-	void StoreFromRegister(int preg);
-	OpArg GetDefaultLocation(int reg) const;
 	const int *GetAllocationOrder(int &count);
-	void SetImmediate32(int preg, u32 immValue);
-};
 
+	MIPSCachedReg regs[NUM_MIPS_GPRS];
+	X64CachedReg xregs[NUM_X_REGS];
 
-class FPURegCache : public RegCache
-{
-public:
-	void Start(MIPSState *mips, MIPSAnalyst::AnalysisResults &stats);
-	void BindToRegister(int preg, bool doLoad = true, bool makeDirty = true);
-	void StoreFromRegister(int preg);
-	const int *GetAllocationOrder(int &count);
-	OpArg GetDefaultLocation(int reg) const;
+	XEmitter *emit;
 };

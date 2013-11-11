@@ -17,46 +17,165 @@
 
 #pragma once
 
-#include "IndexGenerator.h"
-#include "VertexDecoder.h"
+#include <map>
+
+#include "GPU/Common/IndexGenerator.h"
+#include "GPU/GLES/VertexDecoder.h"
+#include "gfx/gl_common.h"
 #include "gfx/gl_lost_manager.h"
 
 class LinkedShader;
 class ShaderManager;
+class TextureCache;
+class FramebufferManager;
+
 struct DecVtxFormat;
+
+// States transitions:
+// On creation: DRAWN_NEW
+// DRAWN_NEW -> DRAWN_HASHING
+// DRAWN_HASHING -> DRAWN_RELIABLE
+// DRAWN_HASHING -> DRAWN_UNRELIABLE
+// DRAWN_ONCE -> UNRELIABLE
+// DRAWN_RELIABLE -> DRAWN_SAFE
+// UNRELIABLE -> death
+// DRAWN_ONCE -> death
+// DRAWN_RELIABLE -> death
+
+// Try to keep this POD.
+class VertexArrayInfo {
+public:
+	VertexArrayInfo() {
+		status = VAI_NEW;
+		vbo = 0;
+		ebo = 0;
+		numDCs = 0;
+		prim = GE_PRIM_INVALID;
+		numDraws = 0;
+		numFrames = 0;
+		lastFrame = gpuStats.numFlips;
+		numVerts = 0;
+		drawsUntilNextFullHash = 0;
+	}
+	~VertexArrayInfo();
+
+	enum Status {
+		VAI_NEW,
+		VAI_HASHING,
+		VAI_RELIABLE,  // cache, don't hash
+		VAI_UNRELIABLE,  // never cache
+	};
+
+	u32 hash;
+
+	Status status;
+
+	u32 vbo;
+	u32 ebo;
+
+	// Precalculated parameter for drawRangeElements
+	u16 numVerts;
+	u16 maxIndex;
+	s8 prim;
+
+	// ID information
+	u8 numDCs;
+	int numDraws;
+	int numFrames;
+	int lastFrame;  // So that we can forget.
+	u16 drawsUntilNextFullHash;
+};
 
 // Handles transform, lighting and drawing.
 class TransformDrawEngine : public GfxResourceHolder {
 public:
 	TransformDrawEngine();
-	~TransformDrawEngine();
-	void SubmitPrim(void *verts, void *inds, int prim, int vertexCount, u32 vertexType, int forceIndexType, int *bytesRead);
-	void DrawBezier(int ucount, int vcount);
-	void DrawSpline(int ucount, int vcount, int utype, int vtype);
-	void Flush();
+	virtual ~TransformDrawEngine();
+
+	void SubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int forceIndexType, int *bytesRead);
+	void SubmitSpline(void* control_points, void* indices, int count_u, int count_v, int type_u, int type_v, GEPatchPrimType prim_type, u32 vertType);
+	void SubmitBezier(void* control_points, void* indices, int count_u, int count_v, GEPatchPrimType prim_type, u32 vertType);
+	bool TestBoundingBox(void* control_points, int vertexCount, u32 vertType);
+
+	void DecodeVerts();
 	void SetShaderManager(ShaderManager *shaderManager) {
 		shaderManager_ = shaderManager;
 	}
-
+	void SetTextureCache(TextureCache *textureCache) {
+		textureCache_ = textureCache;
+	}
+	void SetFramebufferManager(FramebufferManager *fbManager) {
+		framebufferManager_ = fbManager;
+	}
 	void InitDeviceObjects();
 	void DestroyDeviceObjects();
 	void GLLost();
 
+	void DecimateTrackedVertexArrays();
+	void ClearTrackedVertexArrays();
+
+	void SetupVertexDecoder(u32 vertType);
+
+	// This requires a SetupVertexDecoder call first.
+	int EstimatePerVertexCost();
+
+	// So that this can be inlined
+	void Flush() {
+		if (!numDrawCalls)
+			return;
+		DoFlush();
+	}
+
 private:
+	void DoFlush();
 	void SoftwareTransformAndDraw(int prim, u8 *decoded, LinkedShader *program, int vertexCount, u32 vertexType, void *inds, int indexType, const DecVtxFormat &decVtxFormat, int maxIndex);
+	void ApplyDrawState(int prim);
+	bool IsReallyAClear(int numVerts) const;
+
+	// Preprocessing for spline/bezier
+	u32 NormalizeVertices(u8 *outPtr, u8 *bufPtr, const u8 *inPtr, int lowerBound, int upperBound, u32 vertType);
+
+	// drawcall ID
+	u32 ComputeFastDCID();
+	u32 ComputeHash();  // Reads deferred vertex data.
+
+	VertexDecoder *GetVertexDecoder(u32 vtype);
+
+	// Defer all vertex decoding to a Flush, so that we can hash and cache the
+	// generated buffers without having to redecode them every time.
+	struct DeferredDrawCall {
+		void *verts;
+		void *inds;
+		u32 vertType;
+		u8 indexType;
+		u8 prim;
+		u16 vertexCount;
+		u16 indexLowerBound;
+		u16 indexUpperBound;
+	};
 
 	// Vertex collector state
 	IndexGenerator indexGen;
 	int collectedVerts;
+	GEPrimitiveType prevPrim_;
 
+	// Cached vertex decoders
+	std::map<u32, VertexDecoder *> decoderMap_;
+	VertexDecoder *dec_;
+	VertexDecoderJitCache *decJitCache_;
+	u32 lastVType_;
+	
 	// Vertex collector buffers
-	VertexDecoder dec;
-	u32 lastVType;
 	u8 *decoded;
 	u16 *decIndex;
 
 	TransformedVertex *transformed;
 	TransformedVertex *transformedExpanded;
+
+	std::map<u32, VertexArrayInfo *> vai_;
+
+	// Fixed index buffer for easy quad generation from spline/bezier
+	u16 *quadIndices_;
 
 	// Vertex buffer objects
 	// Element buffer objects
@@ -67,6 +186,17 @@ private:
 
 	// Other
 	ShaderManager *shaderManager_;
+	TextureCache *textureCache_;
+	FramebufferManager *framebufferManager_;
+
+	enum { MAX_DEFERRED_DRAW_CALLS = 128 };
+	DeferredDrawCall drawCalls[MAX_DEFERRED_DRAW_CALLS];
+	int numDrawCalls;
+	int vertexCountInDrawCalls;
+
+	int decimationCounter_;
+
+	UVScale *uvScale;
 };
 
 // Only used by SW transform

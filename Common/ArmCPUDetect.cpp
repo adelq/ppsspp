@@ -17,11 +17,17 @@
 
 #include "Common.h"
 #include "CPUDetect.h"
-#include "StringUtil.h"
+#include "StringUtils.h"
+#include "FileUtil.h"
+#ifdef BLACKBERRY
+#include <bps/deviceinfo.h>
+#endif
 
 // Only Linux platforms have /proc/cpuinfo
 #if !defined(BLACKBERRY) && !defined(IOS) && !defined(__SYMBIAN32__)
 const char procfile[] = "/proc/cpuinfo";
+// https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-devices-system-cpu
+const char syscpupresentfile[] = "/sys/devices/system/cpu/present";
 
 char *GetCPUString()
 {
@@ -44,8 +50,65 @@ char *GetCPUString()
 		// INFO_LOG(BOOT, "CPU: %s", cpu_string);
 		break;
 	}
+	
+	fclose(fp);
 	return cpu_string;
 }
+
+unsigned char GetCPUImplementer()
+{
+	const char marker[] = "CPU implementer\t: ";
+	char *implementer_string = 0;
+	unsigned char implementer = 0;
+	char buf[1024];
+
+	File::IOFile file(procfile, "r");
+	auto const fp = file.GetHandle();
+	if (!fp)
+		return 0;
+
+	while (fgets(buf, sizeof(buf), fp))
+	{
+		if (strncmp(buf, marker, sizeof(marker) - 1))
+			continue;
+		implementer_string = buf + sizeof(marker) - 1;
+		implementer_string = strndup(implementer_string, strlen(implementer_string) - 1); // Strip the newline
+		sscanf(implementer_string, "0x%02hhx", &implementer);
+		break;
+	}
+
+	free(implementer_string);
+
+	return implementer;
+}
+
+unsigned short GetCPUPart()
+{
+	const char marker[] = "CPU part\t: ";
+	char *part_string = 0;
+	unsigned short part = 0;
+	char buf[1024];
+
+	File::IOFile file(procfile, "r");
+	auto const fp = file.GetHandle();
+	if (!fp)
+		return 0;
+
+	while (fgets(buf, sizeof(buf), fp))
+	{
+		if (strncmp(buf, marker, sizeof(marker) - 1))
+			continue;
+		part_string = buf + sizeof(marker) - 1;
+		part_string = strndup(part_string, strlen(part_string) - 1); // Strip the newline
+		sscanf(part_string, "0x%03hx", &part);
+		break;
+	}
+
+	free(part_string);
+
+	return part;
+}
+
 bool CheckCPUFeature(const char *feature)
 {
 	const char marker[] = "Features\t: ";
@@ -65,24 +128,43 @@ bool CheckCPUFeature(const char *feature)
 		while (token != NULL)
 		{
 			if (strstr(token, feature))
+			{
+				fclose(fp);
 				return true; 
+			}
 			token = strtok(NULL, " ");
 		}
 	}
+	
+	fclose(fp);
 	return false;
 }
-#endif
+
 int GetCoreCount()
 {
-#ifdef __SYMBIAN32__
-	return 1;
-#elif defined(BLACKBERRY) || defined(IOS)
-	return 2;
-#else
 	const char marker[] = "processor\t: ";
 	int cores = 0;
 	char buf[1024];
 	FILE *fp;
+
+	fp = fopen(syscpupresentfile, "r");
+	if (fp)
+	{
+		fgets(buf, sizeof(buf), fp);
+		fclose(fp);
+
+		int low, high;
+		// Technically, this could be "1-2,4,8-23" but for ARM devices that seems unlikely.
+		int found = sscanf(buf, "%d-%d", &low, &high);
+
+		// Only a single number, so just one slot/core (actually threads.)
+		if (found == 1)
+			return 1;
+		if (found == 2)
+			return high - low + 1;
+
+		// Okay, let's fall back.
+	}
 
 	fp = fopen(procfile, "r");
 	if (!fp)
@@ -94,9 +176,11 @@ int GetCoreCount()
 			continue;
 		++cores;
 	}
+	
+	fclose(fp);
 	return cores;
-#endif
 }
+#endif
 
 CPUInfo cpu_info;
 
@@ -116,8 +200,47 @@ void CPUInfo::Detect()
 	vendor = VENDOR_ARM;
 	
 	// Get the information about the CPU 
-	num_cores = GetCoreCount();
-#if !defined(BLACKBERRY) && !defined(IOS) && !defined(__SYMBIAN32__)
+#if defined(__SYMBIAN32__) || defined(BLACKBERRY) || defined(IOS)
+	bool isVFP3 = false;
+	bool isVFP4 = false;
+#ifdef IOS
+	isVFP3 = true;
+	// Check for swift arch (VFP4)
+#ifdef __ARM_ARCH_7S__
+	isVFP4 = true;
+#endif
+	strcpy(brand_string, "Apple");
+	num_cores = 2;
+#elif defined(BLACKBERRY)
+	isVFP3 = true;
+	deviceinfo_details_t* details;
+	deviceinfo_get_details(&details);
+	num_cores = deviceinfo_details_get_processor_core_count(details);
+	strcpy(brand_string, deviceinfo_details_get_processor_name(details));
+	if (!strncmp(brand_string, "MSM", 3))
+		isVFP4 = true;
+	deviceinfo_free_details(&details);
+#elif defined(SYMBIAN)
+	strcpy(brand_string, "Samsung ARMv6");
+	num_cores = 1;
+#endif
+	// Hardcode this for now
+	bSwp = true;
+	bHalf = true;
+	bThumb = false;
+	bFastMult = true;
+	bVFP = true;
+	bEDSP = true;
+	bThumbEE = isVFP3;
+	bNEON = isVFP3;
+	bVFPv3 = isVFP3;
+	bTLS = true;
+	bVFPv4 = isVFP4;
+	bIDIVa = isVFP4;
+	bIDIVt = isVFP4;
+	bFP = false;
+	bASIMD = false;
+#else
 	strncpy(cpu_string, GetCPUString(), sizeof(cpu_string));
 	bSwp = CheckCPUFeature("swp");
 	bHalf = CheckCPUFeature("half");
@@ -132,31 +255,13 @@ void CPUInfo::Detect()
 	bVFPv4 = CheckCPUFeature("vfpv4");
 	bIDIVa = CheckCPUFeature("idiva");
 	bIDIVt = CheckCPUFeature("idivt");
+	// Qualcomm Krait supports IDIVA but it doesn't report it. Check for krait.
+	if (GetCPUImplementer() == 0x51 && GetCPUPart() == 0x6F) // Krait(300) is 0x6F, Scorpion is 0x4D
+		bIDIVa = bIDIVt = true;
 	// These two require ARMv8 or higher
 	bFP = CheckCPUFeature("fp");
 	bASIMD = CheckCPUFeature("asimd");
-#else
-	// Hardcode this for now
-	bSwp = true;
-	bHalf = true;
-	bThumb = false;
-	bFastMult = true;
-	bVFP = true;
-	bEDSP = true;
-#ifdef __SYMBIAN32__
-	bThumbEE = false;
-	bNEON = false;
-#else
-	bThumbEE = true;
-	bNEON = true;
-#endif
-	bVFPv3 = true;
-	bTLS = true;
-	bVFPv4 = false;
-	bIDIVa = false;
-	bIDIVt = false;
-	bFP = false;
-	bASIMD = false;
+	num_cores = GetCoreCount();
 #endif
 // On android, we build a separate library for ARMv7 so this is fine.
 // TODO: Check for ARMv7 on other platforms.

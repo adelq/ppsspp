@@ -16,28 +16,25 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #ifdef _WIN32
-#include <windows.h>
+#include "Common/CommonWindows.h"
 #include <WindowsX.h>
 #else
 #include <unistd.h>
 #endif
 
-#include <cstring>
 #include <algorithm>
 
-#include "../../Globals.h"
-#include "../../Core/MemMap.h"
-#include "SymbolMap.h"
-
-#include <vector>
-#include <map>
+#include "Common/FileUtil.h"
+#include "Globals.h"
+#include "Core/MemMap.h"
+#include "Core/Debugger/SymbolMap.h"
 
 SymbolMap symbolMap;
 
 //need improvement
 static u32 hasher(u32 last, u32 value)
 {
-	return _rotl(last,3) ^ value;
+	return __rotl(last,3) ^ value;
 }
 
 //#define BWLINKS
@@ -48,13 +45,14 @@ static u32 ComputeHash(u32 start, u32 size)
 {
 	u32 hash=0;
 	for (unsigned int i=start; i<start+size; i+=4)
-		hash = hasher(hash, Memory::Read_Instruction(i));			
+		hash = hasher(hash, Memory::Read_Instruction(i).encoding);
 	return hash;
 }
 
 void SymbolMap::SortSymbols()
 {
-  std::sort(entries.begin(), entries.end());
+	lock_guard guard(lock_);
+	std::sort(entries.begin(), entries.end());
 }
 
 void SymbolMap::AnalyzeBackwards()
@@ -62,74 +60,83 @@ void SymbolMap::AnalyzeBackwards()
 #ifndef BWLINKS
 	return;
 #else
-	for (int i=0; i<numEntries; i++)
-	{
+	for (int i = 0; i < numEntries; i++) {
 		u32 ptr = entries[i].vaddress;
-		if (ptr)
-		{
-			if (entries[i].type == ST_FUNCTION)
-			{
-				for (int a = 0; a<entries[i].size/4; a++)
+		if (!ptr || entries[i].type != ST_FUNCTION)
+			continue;
+		for (int a = 0; a < entries[i].size/4; a++) {
+			u32 inst = CMemory::ReadUncheckedu32(ptr);
+
+			switch (inst >> 26) {
+			case 18:
 				{
-					u32 inst = CMemory::ReadUncheckedu32(ptr);
+					if (LK) {
+						u32 addr;
+						if(AA)
+							addr = SignExt26(LI << 2);
+						else
+							addr = ptr + SignExt26(LI << 2);
 
-					switch (inst>>26)
-					{
-					case 18:
-						{
-							if (LK) //LK
-							{
-								u32 addr;
-								if(AA)
-									addr = SignExt26(LI << 2);
-								else
-									addr = ptr + SignExt26(LI << 2);
-
-								int funNum = SymbolMap::GetSymbolNum(addr);
-								if (funNum>=0) 
-									entries[funNum].backwardLinks.push_back(ptr);
-							}
-							break;
-						}
-					default:
-						;
+						int funNum = GetSymbolNum(addr);
+						if (funNum >= 0)
+							entries[funNum].backwardLinks.push_back(ptr);
 					}
-
-					ptr+=4;
+					break;
 				}
+			default:
+				;
 			}
+
+			ptr += 4;
 		}
 	}
 #endif
 }
 
-
-void SymbolMap::ResetSymbolMap()
-{
+void SymbolMap::Clear() {
+	lock_guard guard(lock_);
 #ifdef BWLINKS
-	for (int i=0; i<numEntries; i++)
-	{
+	for (int i=0; i<numEntries; i++) {
 		entries[i].backwardLinks.clear();
 	}
 #endif
 	entries.clear();
+	uniqueEntries.clear();
+	entryRanges.clear();
 }
-
 
 void SymbolMap::AddSymbol(const char *symbolname, unsigned int vaddress, size_t size, SymbolType st)
 {
+	lock_guard guard(lock_);
 	MapEntry e;
-	strcpy(e.name, symbolname);
+	strncpy(e.name, symbolname, 127);
+	e.name[127] = '\0';
 	e.vaddress = vaddress;
-	e.size = size;
+	e.size = (u32)size;
 	e.type = st;
-	entries.push_back(e);
+	if (uniqueEntries.find((const MapEntryUniqueInfo)e) == uniqueEntries.end())
+	{
+		entries.push_back(e);
+		uniqueEntries.insert((const MapEntryUniqueInfo)e);
+		entryRanges[e.vaddress + e.size] = e.vaddress;
+	}
+}
+
+void SymbolMap::RemoveSymbolNum(int symbolnum){
+	lock_guard guard(lock_);
+	MapEntry &toRemove = entries[symbolnum];
+	
+	uniqueEntries.erase((const MapEntryUniqueInfo) toRemove);
+	entryRanges.erase(toRemove.vaddress + toRemove.size);
+
+	entries.erase(entries.begin() + symbolnum);
 }
 
 bool SymbolMap::LoadSymbolMap(const char *filename)
 {
-	SymbolMap::ResetSymbolMap();
-	FILE *f = fopen(filename,"r");
+	lock_guard guard(lock_);
+	Clear();
+	FILE *f = File::OpenCFile(filename, "r");
 	if (!f)
 		return false;
 	//char temp[256];
@@ -142,11 +149,18 @@ bool SymbolMap::LoadSymbolMap(const char *filename)
 
 	while (!feof(f))
 	{
-		char line[512],temp[256];
+		char line[512], temp[256] = {0};
 		char *p = fgets(line,512,f);
 		if(p == NULL)
 			break;
 		
+		// Chop any newlines off.
+		for (size_t i = strlen(line) - 1; i > 0; i--) {
+			if (line[i] == '\r' || line[i] == '\n') {
+				line[i] = '\0';
+			}
+		}
+
 		if (strlen(line) < 4 || sscanf(line, "%s", temp) != 1)
 			continue;
 
@@ -169,65 +183,94 @@ bool SymbolMap::LoadSymbolMap(const char *filename)
 
 		if (!started) continue;
 		MapEntry e;
-		sscanf(line,"%08x %08x %08x %i %s",&e.address,&e.size,&e.vaddress,(int*)&e.type,e.name);
+		memset(&e, 0, sizeof(e));
+		sscanf(line,"%08x %08x %08x %i %127c",&e.address,&e.size,&e.vaddress,(int*)&e.type,e.name);
 		
 		if (e.type == ST_DATA && e.size==0)
 			e.size=4;
 
 		//e.vaddress|=0x80000000;
-		if (strcmp(e.name,".text")==0 || strcmp(e.name,".init")==0 || strlen(e.name)<=1)
-		{ 
+		if (strcmp(e.name,".text")==0 || strcmp(e.name,".init")==0 || strlen(e.name)<=1) { 
 			;
 		} else {
+			e.UndecorateName();
 			entries.push_back(e);
+			uniqueEntries.insert((const MapEntryUniqueInfo)e);
+			entryRanges[e.vaddress + e.size] = e.vaddress;
 		}
 	}
-	for (size_t i = 0; i < entries.size(); i++)
-		entries[i].UndecorateName();
 	fclose(f);
-	SymbolMap::SortSymbols();
-//	SymbolMap::AnalyzeBackwards();
+	SortSymbols();
+	//	SymbolMap::AnalyzeBackwards();
 	return true;
 }
 
 
-void SymbolMap::SaveSymbolMap(const char *filename)
+void SymbolMap::SaveSymbolMap(const char *filename) const
 {
-	FILE *f = fopen(filename,"w");
+	lock_guard guard(lock_);
+	FILE *f = File::OpenCFile(filename, "w");
 	if (!f)
 		return;
 	fprintf(f,".text\n");
-	for (size_t i = 0; i < entries.size(); i++)
+	for (auto it = entries.begin(), end = entries.end(); it != end; ++it)
 	{
-		MapEntry &e = entries[i];
+		const MapEntry &e = *it;
 		fprintf(f,"%08x %08x %08x %i %s\n",e.address,e.size,e.vaddress,e.type,e.name);
 	}
 	fclose(f);
 }
 
-int SymbolMap::GetSymbolNum(unsigned int address, SymbolType symmask)
+bool SymbolMap::LoadNocashSym(const char *filename)
 {
-	int start=0;
+	lock_guard guard(lock_);
+	FILE *f = File::OpenCFile(filename, "r");
+	if (!f)
+		return false;
 
-	for (size_t i = 0; i < entries.size(); i++)
+	while (!feof(f))
 	{
-		if (address >= entries[i].vaddress)
-			start = i;
-		else
+		char line[256], value[256] = {0};
+		char *p = fgets(line,256,f);
+		if(p == NULL)
 			break;
-	}
-	
-	if (start<0) start=0;
 
-	for (size_t i = 0; i < entries.size(); i++)
-	{
-		unsigned int addr = entries[i].vaddress;
-		if ((address >= addr))
+		u32 address;
+		if (sscanf(line,"%08X %s",&address,value) != 2) continue;
+		if (address == 0 && strcmp(value,"0") == 0) continue;
+
+		if (value[0] == '.')	// data directives
 		{
-			if (address < addr+entries[i].size)
+			continue;			// not supported yet
+		} else {				// labels
+			int size = 1;
+			char* seperator = strchr(value,',');
+			if (seperator != NULL)
+			{
+				*seperator = 0;
+				sscanf(seperator+1,"%08X",&size);
+			}
+			AddSymbol(value,address,size,ST_FUNCTION);
+		}
+	}
+
+	fclose(f);
+	return true;
+}
+
+int SymbolMap::GetSymbolNum(unsigned int address, SymbolType symmask) const
+{
+	lock_guard guard(lock_);
+	for (size_t i = 0, n = entries.size(); i < n; i++)
+	{
+		const MapEntry &entry = entries[i];
+		unsigned int addr = entry.vaddress;
+		if (address >= addr)
+		{
+			if (address < addr + entry.size)
 			{
 				if (entries[i].type & symmask)
-					return i;
+					return (int) i;
 				else
 					return -1;
 			}
@@ -238,10 +281,84 @@ int SymbolMap::GetSymbolNum(unsigned int address, SymbolType symmask)
 	return -1;
 }
 
+bool SymbolMap::GetSymbolInfo(SymbolInfo *info, u32 address, SymbolType symmask) const
+{
+	lock_guard guard(lock_);
+	// entryRanges is indexed by end.  The first entry after address should contain address.
+	// Otherwise, we have no entry that contains it, unless things overlap (which they shouldn't.)
+	const auto containingEntry = entryRanges.upper_bound(address);
+	if (containingEntry == entryRanges.end())
+		return false;
 
-char descriptionTemp[256];
+	// The next most common case is a single symbol by start address.
+	// So we optimize for that by looking in our uniqueEntry set.
+	u32 start_address = containingEntry->second;
+	if (start_address <= address)
+	{
+		const MapEntryUniqueInfo searchKey = {start_address, start_address};
+		const auto entry = uniqueEntries.find(searchKey);
+		// In case there were duplicates at some point, double check the end address.
+		if (entry != uniqueEntries.end() && entry->vaddress + entry->size > address && (entry->type & symmask) != 0)
+		{
+			info->address = entry->vaddress;
+			info->size = entry->size;
+			return true;
+		}
+	}
 
-char *SymbolMap::GetDescription(unsigned int address)
+	// Fall back to a slower scan.
+	int n = GetSymbolNum(address, symmask);
+	if (n != -1)
+	{
+		info->address = GetSymbolAddr(n);
+		info->size = GetSymbolSize(n);
+		return true;
+	}
+
+	return false;
+}
+
+const char* SymbolMap::getDirectSymbol(u32 address)
+{
+	lock_guard guard(lock_);
+	SymbolInfo info;
+	if (GetSymbolInfo(&info,address) == false) return NULL;
+	if (info.address != address) return NULL;	// has to be the START of the function
+
+	// now we need the name... which we can't just get from GetSymbolInfo because of the
+	// unique entries. But, there are so many less instances where there actually IS a
+	// label that the speed up is still massive
+	for (auto it = entries.begin(), end = entries.end(); it != end; ++it)
+	{
+		const MapEntry &entry = *it;
+		unsigned int addr = entry.vaddress;
+		if (addr == address) return entry.name;
+	}
+	return NULL;
+}
+
+bool SymbolMap::getSymbolValue(char* symbol, u32& dest)
+{
+	lock_guard guard(lock_);
+	for (auto it = entries.begin(), end = entries.end(); it != end; ++it)
+	{
+		const MapEntry &entry = *it;
+#ifdef _WIN32
+		if (_stricmp(entry.name,symbol) == 0)
+#else
+		if (strcasecmp(entry.name,symbol) == 0)
+#endif
+		{
+			dest = entry.vaddress;
+			return true;
+		}
+	}
+	return false;
+}
+
+static char descriptionTemp[256];
+
+const char *SymbolMap::GetDescription(unsigned int address) const
 {
 	int fun = SymbolMap::GetSymbolNum(address);
 	//if (address == entries[fun].vaddress)
@@ -259,71 +376,108 @@ char *SymbolMap::GetDescription(unsigned int address)
 }
 
 #ifdef _WIN32
-void SymbolMap::FillSymbolListBox(HWND listbox,SymbolType symmask)
+
+static const int defaultSymbolsAddresses[] = {
+	0x08800000, 0x08804000, 0x04000000, 0x88000000, 0x00010000
+};
+
+static const char* defaultSymbolsNames[] = {
+	"User memory", "Default load address", "VRAM","Kernel memory","Scratchpad"
+};
+
+static const int defaultSymbolsAmount = sizeof(defaultSymbolsAddresses)/sizeof(const int);
+
+void SymbolMap::FillSymbolListBox(HWND listbox,SymbolType symmask) const
 {
-	ShowWindow(listbox,SW_HIDE);
+	BOOL visible = ShowWindow(listbox,SW_HIDE);
 	ListBox_ResetContent(listbox);
 
-	//int style = GetWindowLong(listbox,GWL_STYLE);
-
-	ListBox_AddString(listbox,"(0x80000000)");
-	ListBox_SetItemData(listbox,0,0x80000000);
-
-	//ListBox_AddString(listbox,"(0x80002000)");
-	//ListBox_SetItemData(listbox,1,0x80002000);
-
-	for (size_t i = 0; i < entries.size(); i++)
+	if (symmask & ST_DATA)
 	{
-		if (entries[i].type & symmask)
+		for (int i = 0; i < defaultSymbolsAmount; i++)
 		{
-			char temp[256];
-			sprintf(temp,"%s (%d)",entries[i].name,entries[i].size);
+			wchar_t temp[256];
+			wsprintf(temp, L"0x%08X (%S)", defaultSymbolsAddresses[i], defaultSymbolsNames[i]);
 			int index = ListBox_AddString(listbox,temp);
-			ListBox_SetItemData(listbox,index,entries[i].vaddress);
+			ListBox_SetItemData(listbox,index,defaultSymbolsAddresses[i]);
 		}
 	}
 
-	ShowWindow(listbox,SW_SHOW);
+	lock_guard guard(lock_);
+
+	SendMessage(listbox, WM_SETREDRAW, FALSE, 0);
+	SendMessage(listbox, LB_INITSTORAGE, (WPARAM)entries.size(), (LPARAM)entries.size() * 30);
+	for (auto it = entries.begin(), end = entries.end(); it != end; ++it)
+	{
+		const MapEntry &entry = *it;
+		if (entry.type & symmask)
+		{
+			wchar_t temp[256];
+			if (entry.type & ST_FUNCTION || !(entry.type & ST_DATA))
+			{
+				wsprintf(temp, L"%S", entry.name);
+			} else {
+				wsprintf(temp, L"0x%08X (%S)", entry.vaddress, entry.name);
+			}
+
+			int index = ListBox_AddString(listbox,temp);
+			ListBox_SetItemData(listbox,index,entry.vaddress);
+		}
+	}
+	SendMessage(listbox, WM_SETREDRAW, TRUE, 0);
+	RedrawWindow(listbox, NULL, NULL, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+
+	if (visible)
+		ShowWindow(listbox,SW_SHOW);
 }
 
-void SymbolMap::FillSymbolComboBox(HWND listbox,SymbolType symmask)
+void SymbolMap::FillSymbolComboBox(HWND listbox,SymbolType symmask) const
 {
 	ShowWindow(listbox,SW_HIDE);
 	ComboBox_ResetContent(listbox);
 
 	//int style = GetWindowLong(listbox,GWL_STYLE);
 
-	ComboBox_AddString(listbox,"(0x02000000)");
-	ComboBox_SetItemData(listbox,0,0x02000000);
+	ComboBox_AddString(listbox, L"(0x02000000)");
+	ComboBox_SetItemData(listbox, 0, 0x02000000);
 
-	//ListBox_AddString(listbox,"(0x80002000)");
-	//ListBox_SetItemData(listbox,1,0x80002000);
+	//ListBox_AddString(listbox, L"(0x80002000)");
+	//ListBox_SetItemData(listbox, 1, 0x80002000);
 
-	for (size_t i = 0; i < entries.size(); i++)
+	lock_guard guard(lock_);
+
+	SendMessage(listbox, WM_SETREDRAW, FALSE, 0);
+	SendMessage(listbox, CB_INITSTORAGE, (WPARAM)entries.size(), (LPARAM)entries.size() * 30 * sizeof(wchar_t));
+	for (size_t i = 0, end = entries.size(); i < end; ++i)
 	{
-		if (entries[i].type & symmask)
+		const MapEntry &entry = entries[i];
+		if (entry.type & symmask)
 		{
-			char temp[256];
-			sprintf(temp,"%s (%d)",entries[i].name,entries[i].size);
+			wchar_t temp[256];
+			wsprintf(temp, L"%S (%d)", entry.name, entry.size);
 			int index = ComboBox_AddString(listbox,temp);
-			ComboBox_SetItemData(listbox,index,entries[i].vaddress);
+			ComboBox_SetItemData(listbox,index,entry.vaddress);
 		}
 	}
-	
+	SendMessage(listbox, WM_SETREDRAW, TRUE, 0);
+	RedrawWindow(listbox, NULL, NULL, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
 	ShowWindow(listbox,SW_SHOW);
 }
 
-void SymbolMap::FillListBoxBLinks(HWND listbox, int num)
-{	
+void SymbolMap::FillListBoxBLinks(HWND listbox, int num) const
+{
 	ListBox_ResetContent(listbox);
-		
+
+	lock_guard guard(lock_);
+
 	int style = GetWindowLong(listbox,GWL_STYLE);
 
-	MapEntry &e = entries[num];
+	const MapEntry &e = entries[num];
 #ifdef BWLINKS
 	for (int i=0; i<e.backwardLinks.size(); i++)
 	{
 		u32 addr = e.backwardLinks[i];
+		// TODO: wchar_t
 		int index = ListBox_AddString(listbox,SymbolMap::GetSymbolName(SymbolMap::GetSymbolNum(addr)));
 		ListBox_SetItemData(listbox,index,addr);
 	}
@@ -331,38 +485,63 @@ void SymbolMap::FillListBoxBLinks(HWND listbox, int num)
 }
 #endif
 
-int SymbolMap::GetNumSymbols()
+int SymbolMap::GetNumSymbols() const
 {
+	lock_guard guard(lock_);
 	return (int)entries.size();
 }
-char *SymbolMap::GetSymbolName(int i)
+
+SymbolType SymbolMap::GetSymbolType(int i) const
+{
+	return entries[i].type;
+}
+
+const char *SymbolMap::GetSymbolName(int i) const
 {
 	return entries[i].name;
 }
 void SymbolMap::SetSymbolName(int i, const char *newname)
 {
-	strcpy(entries[i].name, newname);
+	strncpy(entries[i].name, newname, sizeof(entries[i].name));
 }
 
-u32 SymbolMap::GetSymbolAddr(int i)
+void SymbolMap::SetSymbolSize(int i, int newSize){
+	lock_guard guard(lock_);
+	MapEntry &e = entries[i];
+	
+	std::set<MapEntryUniqueInfo>::iterator it = uniqueEntries.find((const MapEntryUniqueInfo) e);
+	if (it != uniqueEntries.end()){
+		MapEntryUniqueInfo temp = *it;
+		temp.size = newSize;
+		uniqueEntries.erase(it);
+		uniqueEntries.insert(temp);
+	}
+	entryRanges.erase(e.vaddress + e.size);
+	entryRanges.insert(std::pair<u32,u32>(e.vaddress+newSize,e.vaddress));
+
+	e.size = newSize;
+}
+
+u32 SymbolMap::GetSymbolAddr(int i) const
 {
 	return entries[i].vaddress;
 }
 
-u32 SymbolMap::GetSymbolSize(int i)
+u32 SymbolMap::GetSymbolSize(int i) const
 {
 	return entries[i].size;
 }
 
-int SymbolMap::FindSymbol(const char *name)
+int SymbolMap::FindSymbol(const char *name) const
 {
+	lock_guard guard(lock_);
 	for (size_t i = 0; i < entries.size(); i++)
 		if (strcmp(entries[i].name,name)==0)
-			return i;
+			return (int) i;
 	return -1;
 }
 
-u32 SymbolMap::GetAddress(int num)
+u32 SymbolMap::GetAddress(int num) const
 {
 	return entries[num].vaddress;
 }
@@ -372,7 +551,7 @@ void SymbolMap::IncreaseRunCount(int num)
 	entries[num].runCount++;
 }
 
-unsigned int SymbolMap::GetRunCount(int num)
+unsigned int SymbolMap::GetRunCount(int num) const
 {
 	if (num>=0)
 		return entries[num].runCount;
@@ -384,23 +563,24 @@ unsigned int SymbolMap::GetRunCount(int num)
 // to make a symbol map, load a dol or somethin without symbols, then apply 
 // the map with SymbolMap::usefuncsignaturesfile.
 
-void SymbolMap::CompileFuncSignaturesFile(const char *filename)
+void SymbolMap::CompileFuncSignaturesFile(const char *filename) const
 {
 	// Store name,length,first instruction,hash into file
-	FILE *f = fopen(filename, "w");
+	FILE *f = File::OpenCFile(filename, "w");
 	fprintf(f,"00000000\n");
 	int count=0;
-	for (size_t i = 0; i < entries.size(); i++)
+	for (auto it = entries.begin(), end = entries.end(); it != end; ++it)
 	{
-		int size = entries[i].size;
-		if (size >= 16 && entries[i].type == ST_FUNCTION)
+		const MapEntry &entry = *it;
+		int size = entry.size;
+		if (size >= 16 && entry.type == ST_FUNCTION)
 		{
-			u32 inst = Memory::Read_Instruction(entries[i].vaddress); //try to make a bigger number of different vals sometime
+			u32 inst = Memory::Read_Instruction(entry.vaddress).encoding; //try to make a bigger number of different vals sometime
 			if (inst != 0)
 			{
 				char temp[64];
-				strncpy(temp,entries[i].name,63);
-				fprintf(f, "%08x\t%08x\t%08x\t%s\n", inst, size, ComputeHash(entries[i].vaddress,size), temp);    
+				strncpy(temp,entry.name,63);
+				fprintf(f, "%08x\t%08x\t%08x\t%s\n", inst, size, ComputeHash(entry.vaddress,size), temp);    
 				count++;
 			}
 		}
@@ -435,9 +615,9 @@ Sigmap sigmap;
 void SymbolMap::UseFuncSignaturesFile(const char *filename, u32 maxAddress)
 {
 	sigs.clear();
-	//SymbolMap::ResetSymbolMap();
+	// symbolMap.Clear();
 	//#1: Read the signature file and put them in a fast data structure
-	FILE *f = fopen(filename, "r");
+	FILE *f = File::OpenCFile(filename, "r");
 	int count;
 	if (fscanf(f, "%08x\n", &count) != 1)
 		count = 0;
@@ -450,27 +630,27 @@ void SymbolMap::UseFuncSignaturesFile(const char *filename, u32 maxAddress)
 		else
 			break;
 	}
-	int numSigs = sigs.size();
+	size_t numSigs = sigs.size();
 	fclose(f);
 	std::sort(sigs.begin(), sigs.end());
 
 	f = fopen("C:\\mojs.txt", "w");
 	fprintf(f,"00000000\n");
-	for (int j=0; j<numSigs; j++)
+	for (size_t j=0; j<numSigs; j++)
 		fprintf(f, "%08x\t%08x\t%08x\t%s\n", sigs[j].inst, sigs[j].size, sigs[j].hash, sigs[j].name);    
 	fseek(f,0,SEEK_SET);
-	fprintf(f,"%08x",numSigs);
+	fprintf(f,"%08x", (unsigned int)numSigs);
 	fclose(f);
 
 	u32 last = 0xc0d3babe;
-	for (int i=0; i<numSigs; i++)
-  {
+	for (size_t i=0; i<numSigs; i++)
+	{
 		if (sigs[i].inst != last)
 		{
 			sigmap.insert(Sigmap::value_type(sigs[i].inst, &sigs[i]));
 			last = sigs[i].inst;
 		}
-  }
+	}
 
 	//#2: Scan/hash the memory and locate functions
 	char temp[256];
@@ -482,7 +662,7 @@ void SymbolMap::UseFuncSignaturesFile(const char *filename, u32 maxAddress)
 			sprintf(temp,"Scanning: %08x",addr);
 			lastAddr=addr;
 		}
-		u32 inst = Memory::Read_Instruction(addr);
+		u32 inst = Memory::Read_Instruction(addr).encoding;
 		if (!inst) 
 			continue;
 
@@ -507,6 +687,8 @@ void SymbolMap::UseFuncSignaturesFile(const char *filename, u32 maxAddress)
 					strcpy(e.name,sig->name);
 					addr+=sig->size-4; //don't need to check function interior
 					entries.push_back(e);
+					uniqueEntries.insert((const MapEntryUniqueInfo)e);
+					entryRanges[e.vaddress + e.size] = e.vaddress;
 					break;
 				}
 				sig++;

@@ -19,25 +19,24 @@
 
 #include "HLETables.h"
 
-#include "sceCtrl.h"
-#include "sceDisplay.h"
-#include "sceHttp.h"
 #include "sceAtrac.h"
-#include "sceIo.h"
-#include "sceHprm.h"
-#include "scePower.h"
-#include "sceFont.h"
-#include "sceNet.h"
-#include "sceMpeg.h"
-#include "sceImpose.h"
-#include "sceGe.h"
-#include "scePsmf.h"
-#include "sceRtc.h"
-#include "sceSas.h"
-#include "sceUmd.h"
+#include "sceAudio.h"
+#include "sceAudiocodec.h"
+#include "sceCcc.h"
+#include "sceChnnlsv.h"
+#include "sceCtrl.h"
+#include "sceDeflt.h"
+#include "sceDisplay.h"
 #include "sceDmac.h"
-#include "sceRtc.h"
-#include "sceOpenPSID.h"
+#include "sceFont.h"
+#include "sceGameUpdate.h"
+#include "sceGe.h"
+#include "sceHeap.h"
+#include "sceHprm.h"
+#include "sceHttp.h"
+#include "sceImpose.h"
+#include "sceIo.h"
+#include "sceJpeg.h"
 #include "sceKernel.h"
 #include "sceKernelEventFlag.h"
 #include "sceKernelMemory.h"
@@ -46,13 +45,28 @@
 #include "sceKernelSemaphore.h"
 #include "sceKernelThread.h"
 #include "sceKernelTime.h"
-#include "sceAudio.h"
-#include "sceUtility.h"
-#include "sceParseUri.h"
-#include "sceSsl.h"
+#include "sceMd5.h"
+#include "sceMp4.h"
+#include "sceMp3.h"
+#include "sceNet.h"
+#include "sceNetAdhoc.h"
+#include "sceNp.h"
+#include "sceMpeg.h"
+#include "sceOpenPSID.h"
+#include "sceP3da.h"
 #include "sceParseHttp.h"
-#include "sceVaudio.h"
+#include "sceParseUri.h"
+#include "scePauth.h"
+#include "scePower.h"
+#include "scePspNpDrm_user.h"
+#include "scePsmf.h"
+#include "sceRtc.h"
+#include "sceSas.h"
+#include "sceSsl.h"
+#include "sceUmd.h"
 #include "sceUsb.h"
+#include "sceUtility.h"
+#include "sceVaudio.h"
 
 #define N(s) s
 
@@ -63,11 +77,12 @@
 //kjfs
 //sound
 //zlibdec
-const HLEFunction FakeSysCalls[] =
-{
+const HLEFunction FakeSysCalls[] = {
 	{NID_THREADRETURN, __KernelReturnFromThread, "__KernelReturnFromThread"},
 	{NID_CALLBACKRETURN, __KernelReturnFromMipsCall, "__KernelReturnFromMipsCall"},
 	{NID_INTERRUPTRETURN, __KernelReturnFromInterrupt, "__KernelReturnFromInterrupt"},
+	{NID_EXTENDRETURN, __KernelReturnFromExtendStack, "__KernelReturnFromExtendStack"},
+	{NID_MODULERETURN, __KernelReturnFromModuleFunc, "__KernelReturnFromModuleFunc"},
 	{NID_IDLE, __KernelIdle, "_sceKernelIdle"},
 };
 
@@ -75,25 +90,25 @@ const HLEFunction UtilsForUser[] =
 {
 	{0x91E4F6A7, WrapU_V<sceKernelLibcClock>, "sceKernelLibcClock"},
 	{0x27CC57F0, WrapU_U<sceKernelLibcTime>, "sceKernelLibcTime"},
-	{0x71EC4271, WrapU_U<sceKernelLibcGettimeofday>, "sceKernelLibcGettimeofday"},
+	{0x71EC4271, WrapU_UU<sceKernelLibcGettimeofday>, "sceKernelLibcGettimeofday"},
 	{0xBFA98062, WrapI_UI<sceKernelDcacheInvalidateRange>, "sceKernelDcacheInvalidateRange"},
-	{0xC8186A58, 0, "sceKernelUtilsMd5Digest"},
-	{0x9E5C5086, 0, "sceKernelUtilsMd5BlockInit"},
-	{0x61E1E525, 0, "sceKernelUtilsMd5BlockUpdate"},
-	{0xB8D24E78, 0, "sceKernelUtilsMd5BlockResult"},
-	{0x840259F1, 0, "sceKernelUtilsSha1Digest"},
-	{0xF8FCD5BA, 0, "sceKernelUtilsSha1BlockInit"},
-	{0x346F6DA8, 0, "sceKernelUtilsSha1BlockUpdate"},
-	{0x585F1C09, 0, "sceKernelUtilsSha1BlockResult"},
-	{0xE860E75E, 0, "sceKernelUtilsMt19937Init"},
-	{0x06FB8A63, 0, "sceKernelUtilsMt19937UInt"},
+	{0xC8186A58, WrapI_UIU<sceKernelUtilsMd5Digest>, "sceKernelUtilsMd5Digest"},
+	{0x9E5C5086, WrapI_U<sceKernelUtilsMd5BlockInit>, "sceKernelUtilsMd5BlockInit"},
+	{0x61E1E525, WrapI_UUI<sceKernelUtilsMd5BlockUpdate>, "sceKernelUtilsMd5BlockUpdate"},
+	{0xB8D24E78, WrapI_UU<sceKernelUtilsMd5BlockResult>, "sceKernelUtilsMd5BlockResult"},
+	{0x840259F1, WrapI_UIU<sceKernelUtilsSha1Digest>, "sceKernelUtilsSha1Digest"},
+	{0xF8FCD5BA, WrapI_U<sceKernelUtilsSha1BlockInit>, "sceKernelUtilsSha1BlockInit"},
+	{0x346F6DA8, WrapI_UUI<sceKernelUtilsSha1BlockUpdate>, "sceKernelUtilsSha1BlockUpdate"},
+	{0x585F1C09, WrapI_UU<sceKernelUtilsSha1BlockResult>, "sceKernelUtilsSha1BlockResult"},
+	{0xE860E75E, WrapU_UU<sceKernelUtilsMt19937Init>, "sceKernelUtilsMt19937Init"},
+	{0x06FB8A63, WrapU_U<sceKernelUtilsMt19937UInt>, "sceKernelUtilsMt19937UInt"},
 	{0x37FB5C42, WrapU_V<sceKernelGetGPI>, "sceKernelGetGPI"},
 	{0x6AD345D7, WrapV_U<sceKernelSetGPO>, "sceKernelSetGPO"},
 	{0x79D1C3FA, WrapI_V<sceKernelDcacheWritebackAll>, "sceKernelDcacheWritebackAll"},
 	{0xB435DEC5, WrapI_V<sceKernelDcacheWritebackInvalidateAll>, "sceKernelDcacheWritebackInvalidateAll"},
 	{0x3EE30821, WrapI_UI<sceKernelDcacheWritebackRange>, "sceKernelDcacheWritebackRange"},
 	{0x34B9FA9E, WrapI_UI<sceKernelDcacheWritebackInvalidateRange>, "sceKernelDcacheWritebackInvalidateRange"},
-	{0xC2DF770E, 0, "sceKernelIcacheInvalidateRange"},
+	{0xC2DF770E, WrapI_UI<sceKernelIcacheInvalidateRange>, "sceKernelIcacheInvalidateRange"},
 	{0x80001C4C, 0, "sceKernelDcacheProbe"},
 	{0x16641D70, 0, "sceKernelDcacheReadTag"},
 	{0x4FD31C9D, 0, "sceKernelIcacheProbe"},
@@ -110,12 +125,44 @@ const HLEFunction IoFileMgrForKernel[] =
 	{0x8E982A74, 0, "sceIoAddDrv"},
 	{0xC7F35804, 0, "sceIoDelDrv"},
 	{0x3C54E908, 0, "sceIoReopen"},
+	{0xb29ddf9c, 0, "sceIoDopen"},
+	{0xe3eb004c, 0, "sceIoDread"},
+	{0xeb092469, 0, "sceIoDclose"},
+	{0x109f50bc, 0, "sceIoOpen"},
+	{0x6a638d83, 0, "sceIoRead"},
+	{0x42ec03ac, 0, "sceIoWrite"},
+	{0x68963324, 0, "sceIoLseek32"},
+	{0x27eb27b8, 0, "sceIoLseek"},
+	{0x810c4bc3, 0, "sceIoClose"},
+	{0x779103a0, 0, "sceIoRename"},
+	{0xf27a9c51, 0, "sceIoRemove"},
+	{0x55f4717d, 0, "sceIoChdir"},
+	{0x06a70004, 0, "sceIoMkdir"},
+	{0x1117c65f, 0, "sceIoRmdir"},
+	{0x54f5fb11, 0, "sceIoDevctl"},
+	{0x63632449, 0, "sceIoIoctl"},
+	{0xab96437f, 0, "sceIoSync"},
+	{0xb2a628c1, 0, "sceIoAssign"},
+	{0x6d08a871, 0, "sceIoUnassign"},
+	{0xace946e8, 0, "sceIoGetstat"},
+	{0xb8a740f4, 0, "sceIoChstat"},
+	{0xa0b5a7c2, 0, "sceIoReadAsync"},
+	{0x3251ea56, 0, "sceIoPollAsync"},
+	{0xe23eec33, 0, "sceIoWaitAsync"},
+	{0x35dbd746, 0, "sceIoWaitAsyncCB"},
+	{0xbd17474f, 0, "IoFileMgrForKernel_BD17474F"},
+	{0x76da16e3, 0, "IoFileMgrForKernel_76DA16E3"},
 };
 const HLEFunction StdioForKernel[] = 
 {
 	{0x98220F3E, 0, "sceKernelStdoutReopen"},
 	{0xFB5380C5, 0, "sceKernelStderrReopen"},
+	{0xcab439df, 0, "printf"},
 	{0x2CCF071A, 0, "fdprintf"},
+	{0xd97c8cb9, 0, "puts"},
+	{0x172D316E, 0, "sceKernelStdin"},
+	{0xA6BAB2E9, 0, "sceKernelStdout"},
+	{0xF78BA90A, 0, "sceKernelStderr"},
 };
 const HLEFunction LoadCoreForKernel[] = 
 {
@@ -124,7 +171,7 @@ const HLEFunction LoadCoreForKernel[] =
 	{0xBF983EF2, 0, "sceKernelProbeExecutableObject"},
 	{0x7068E6BA, 0, "sceKernelLoadExecutableObject"},
 	{0xB4D6FECC, 0, "sceKernelApplyElfRelSection"},
-	{0x54AB2675, 0, "LoadCoreForKernel_54AB2675"},
+	{0x54AB2675, 0, "sceKernelApplyPspRelSection"},
 	{0x2952F5AC, 0, "sceKernelDcacheWBinvAll"},
 	{0xD8779AC6, WrapU_V<sceKernelIcacheClearAll>, "sceKernelIcacheClearAll"},
 	{0x99A695F0, 0, "sceKernelRegisterLibrary"},
@@ -148,7 +195,8 @@ const HLEFunction LoadCoreForKernel[] =
 	{0xCCE4A157, 0, "sceKernelFindModuleByUID"},
 	{0x82CE54ED, 0, "sceKernelModuleCount"},
 	{0xC0584F0C, 0, "sceKernelGetModuleList"},
-        {0xCF8A41B1, WrapU_V<sceKernelFindModuleByName>,"sceKernelFindModuleByName"},
+	{0xCF8A41B1, WrapU_C<sceKernelFindModuleByName>,"sceKernelFindModuleByName"},
+	{0xb95fa50d, 0, "LoadCoreForKernel_B95FA50D"},
 };
 
 
@@ -166,9 +214,9 @@ const HLEFunction KDebugForKernel[] =
 	{0xE6554FDA, 0, "sceKernelRegisterDebugRead"},
 	{0xB9C643C9, 0, "sceKernelDebugEcho"},
 	{0x7D1C74F0, 0, "sceKernelDebugEchoSet"},
-	{0x24C32559, 0, "KDebugForKernel_24C32559"},
+	{0x24C32559, 0, "sceKernelDipsw"},
 	{0xD636B827, 0, "sceKernelRemoveByDebugSection"},
-	{0x5282DD5E, 0, "KDebugForKernel_5282DD5E"},
+	{0x5282DD5E, 0, "sceKernelDipswSet"},
 	{0x9F8703E4, 0, "KDebugForKernel_9F8703E4"},
 	{0x333DCEC7, 0, "KDebugForKernel_333DCEC7"},
 	{0xE892D9A1, 0, "KDebugForKernel_E892D9A1"},
@@ -209,20 +257,25 @@ static const int numModules = sizeof(moduleList)/sizeof(HLEModule);
 void RegisterAllModules() {
 	Register_Kernel_Library();
 	Register_ThreadManForUser();
+	Register_ThreadManForKernel();
 	Register_LoadExecForUser();
+	Register_UtilsForKernel();
 	Register_SysMemUserForUser();
 	Register_InterruptManager();
 	Register_IoFileMgrForUser();
 	Register_ModuleMgrForUser();
+	Register_ModuleMgrForKernel();
 	Register_StdioForUser();
 
 	Register_sceHprm();
+	Register_sceCcc();
 	Register_sceCtrl();
 	Register_sceDisplay();
 	Register_sceAudio();
 	Register_sceSasCore();
 	Register_sceFont();
 	Register_sceNet();
+	Register_sceNetAdhoc();
 	Register_sceRtc();
 	Register_sceWlanDrv();
 	Register_sceMpeg();
@@ -244,6 +297,21 @@ void RegisterAllModules() {
 	Register_sceParseHttp();
 	Register_sceVaudio();
 	Register_sceUsb();
+	Register_sceChnnlsv();
+	Register_sceNpDrm();
+	Register_sceP3da();
+	Register_sceGameUpdate();
+	Register_sceDeflt();
+	Register_sceMp4();
+	Register_scePauth();
+	Register_sceNp();
+	Register_sceNpCommerce2();
+	Register_sceNpService();
+	Register_sceNpAuth();
+	Register_sceMd5();
+	Register_sceJpeg();
+	Register_sceAudiocodec();
+	Register_sceHeap();
 
 	for (int i = 0; i < numModules; i++)
 	{

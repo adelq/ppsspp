@@ -25,12 +25,19 @@
 #if defined(__SYMBIAN32__) || defined(PANDORA)
 #include <signal.h>
 #endif
+#include <vector>
 
 #undef _IP
 #undef R0
 #undef _SP
 #undef _LR
 #undef _PC
+
+// VCVT flags
+#define TO_FLOAT      0
+#define TO_INT        1 << 0
+#define IS_SIGNED     1 << 1
+#define ROUND_TO_ZERO 1 << 2
 
 namespace ArmGen
 {
@@ -97,6 +104,13 @@ enum ShiftType
 	ST_ROR = 3,
 	ST_RRX = 4
 };
+enum IntegerSize
+{
+	I_I8 = 0, 
+	I_I16,
+	I_I32,
+	I_I64
+};
 
 enum
 {
@@ -122,7 +136,7 @@ protected:
 	u32 Value;
 
 private:
-	OpType Type;	
+	OpType Type;
 
 	// IMM types
 	u8	Rotation; // Only for u8 values
@@ -140,7 +154,7 @@ public:
 	{ 
 		Type = type; 
 		Value = imm; 
-		Rotation = 0;		
+		Rotation = 0;
 	}
 
 	Operand2(ARMReg Reg)
@@ -158,41 +172,41 @@ public:
 	Operand2(ARMReg base, ShiftType type, ARMReg shift) // RSR
 	{
 		Type = TYPE_RSR;
-		_assert_msg_(DYNA_REC, type != ST_RRX, "Invalid Operand2: RRX does not take a register shift amount");
+		_assert_msg_(JIT, type != ST_RRX, "Invalid Operand2: RRX does not take a register shift amount");
 		IndexOrShift = shift;
 		Shift = type;
 		Value = base;
 	}
 
-	Operand2(u8 shift, ShiftType type, ARMReg base)// For IMM shifted register
+	Operand2(ARMReg base, ShiftType type, u8 shift)// For IMM shifted register
 	{
 		if(shift == 32) shift = 0;
 		switch (type)
 		{
 		case ST_LSL:
-			_assert_msg_(DYNA_REC, shift < 32, "Invalid Operand2: LSL %u", shift);
+			_assert_msg_(JIT, shift < 32, "Invalid Operand2: LSL %u", shift);
 			break;
 		case ST_LSR:
-			_assert_msg_(DYNA_REC, shift <= 32, "Invalid Operand2: LSR %u", shift);
+			_assert_msg_(JIT, shift <= 32, "Invalid Operand2: LSR %u", shift);
 			if (!shift)
 				type = ST_LSL;
 			if (shift == 32)
 				shift = 0;
 			break;
 		case ST_ASR:
-			_assert_msg_(DYNA_REC, shift < 32, "Invalid Operand2: LSR %u", shift);
+			_assert_msg_(JIT, shift < 32, "Invalid Operand2: ASR %u", shift);
 			if (!shift)
 				type = ST_LSL;
 			if (shift == 32)
 				shift = 0;
 			break;
 		case ST_ROR:
-			_assert_msg_(DYNA_REC, shift < 32, "Invalid Operand2: ROR %u", shift);
+			_assert_msg_(JIT, shift < 32, "Invalid Operand2: ROR %u", shift);
 			if (!shift)
 				type = ST_LSL;
 			break;
 		case ST_RRX:
-			_assert_msg_(DYNA_REC, shift == 0, "Invalid Operand2: RRX does not take an immediate shift amount");
+			_assert_msg_(JIT, shift == 0, "Invalid Operand2: RRX does not take an immediate shift amount");
 			type = ST_ROR;
 			break;
 		}
@@ -201,7 +215,7 @@ public:
 		Value = base;
 		Type = TYPE_IMMSREG;
 	}
-	const u32 GetData()
+	u32 GetData()
 	{
 		switch(Type)
 		{
@@ -214,86 +228,86 @@ public:
 		case TYPE_RSR:
 			return RSR();
 		default:
-			_assert_msg_(DYNA_REC, false, "GetData with Invalid Type");
+			_assert_msg_(JIT, false, "GetData with Invalid Type");
 			return 0;
 		}
 	}
-	const u32 IMMSR() // IMM shifted register
+	u32 IMMSR() // IMM shifted register
 	{
-		_assert_msg_(DYNA_REC, Type = TYPE_IMMSREG, "IMMSR must be imm shifted register");
+		_assert_msg_(JIT, Type == TYPE_IMMSREG, "IMMSR must be imm shifted register");
 		return ((IndexOrShift & 0x1f) << 7 | (Shift << 5) | Value);
 	}
-	const u32 RSR() // Register shifted register
+	u32 RSR() // Register shifted register
 	{
-		_assert_msg_(DYNA_REC, Type == TYPE_RSR, "RSR must be RSR Of Course");
+		_assert_msg_(JIT, Type == TYPE_RSR, "RSR must be RSR Of Course");
 		return (IndexOrShift << 8) | (Shift << 5) | 0x10 | Value;
 	}
-	const u32 Rm()
+	u32 Rm()
 	{
-		_assert_msg_(DYNA_REC, Type == TYPE_REG, "Rm must be with Reg");
+		_assert_msg_(JIT, Type == TYPE_REG, "Rm must be with Reg");
 		return Value;
 	}
 
-	const u32 Imm5()
+	u32 Imm5()
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm5 not IMM value");
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm5 not IMM value");
 		return ((Value & 0x0000001F) << 7);
 	}
-	const u32 Imm8()
+	u32 Imm8()
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm8Rot not IMM value");
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm8Rot not IMM value");
 		return Value & 0xFF;
 	}
-	const u32 Imm8Rot() // IMM8 with Rotation
+	u32 Imm8Rot() // IMM8 with Rotation
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm8Rot not IMM value");
-		_assert_msg_(DYNA_REC, (Rotation & 0xE1) != 0, "Invalid Operand2: immediate rotation %u", Rotation);
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm8Rot not IMM value");
+		_assert_msg_(JIT, (Rotation & 0xE1) != 0, "Invalid Operand2: immediate rotation %u", Rotation);
 		return (1 << 25) | (Rotation << 7) | (Value & 0x000000FF);
 	}
-	const u32 Imm12()
+	u32 Imm12()
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm12 not IMM");
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm12 not IMM");
 		return (Value & 0x00000FFF);
 	}
 
-	const u32 Imm12Mod()
+	u32 Imm12Mod()
 	{
-		// This is a IMM12 with the top four bits being rotation and the
-		// bottom eight being a IMM. This is for instructions that need to
+		// This is an IMM12 with the top four bits being rotation and the
+		// bottom eight being an IMM. This is for instructions that need to
 		// expand a 8bit IMM to a 32bit value and gives you some rotation as
 		// well.
 		// Each rotation rotates to the right by 2 bits
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm12Mod not IMM");
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm12Mod not IMM");
 		return ((Rotation & 0xF) << 8) | (Value & 0xFF);
 	}
-	const u32 Imm16()
+	u32 Imm16()
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm16 not IMM");
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm16 not IMM");
 		return ( (Value & 0xF000) << 4) | (Value & 0x0FFF);
 	}
-	const u32 Imm16Low()
+	u32 Imm16Low()
 	{
 		return Imm16();
 	}
-	const u32 Imm16High() // Returns high 16bits
+	u32 Imm16High() // Returns high 16bits
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm16 not IMM");
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm16 not IMM");
 		return ( ((Value >> 16) & 0xF000) << 4) | ((Value >> 16) & 0x0FFF);
 	}
-	const u32 Imm24()
+	u32 Imm24()
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm16 not IMM");
-		return (Value & 0x0FFFFFFF);	
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm16 not IMM");
+		return (Value & 0x0FFFFFFF);
 	}
 	// NEON and ASIMD specific
-	const u32 Imm8ASIMD()
+	u32 Imm8ASIMD()
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm8ASIMD not IMM");
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm8ASIMD not IMM");
 		return  ((Value & 0x80) << 17) | ((Value & 0x70) << 12) | (Value & 0xF);
 	}
-	const u32 Imm8VFP()
+	u32 Imm8VFP()
 	{
-		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm8VFP not IMM");
+		_assert_msg_(JIT, (Type == TYPE_IMM), "Imm8VFP not IMM");
 		return ((Value & 0xF0) << 12) | (Value & 0xF);
 	}
 };
@@ -306,15 +320,28 @@ bool TryMakeOperand2(u32 imm, Operand2 &op2);
 bool TryMakeOperand2_AllowInverse(u32 imm, Operand2 &op2, bool *inverse);
 bool TryMakeOperand2_AllowNegation(s32 imm, Operand2 &op2, bool *negated);
 
+// Use this only when you know imm can be made into an Operand2.
+Operand2 AssumeMakeOperand2(u32 imm);
+
 inline Operand2 R(ARMReg Reg)	{ return Operand2(Reg, TYPE_REG); }
 inline Operand2 IMM(u32 Imm)	{ return Operand2(Imm, TYPE_IMM); }
-inline Operand2 Mem(void *ptr)	{ return Operand2((u32)ptr, TYPE_IMM); }
+inline Operand2 Mem(void *ptr)	{ return Operand2((u32)(uintptr_t)ptr, TYPE_IMM); }
+//usage: struct {int e;} s; STRUCT_OFFSET(s,e)
+#define STRUCT_OFF(str,elem) ((u32)((u32)&(str).elem-(u32)&(str)))
+
 
 struct FixupBranch
 {
 	u8 *ptr;
 	u32 condition; // Remembers our codition at the time
 	int type; //0 = B 1 = BL
+};
+
+struct LiteralPool
+{
+	intptr_t loc;
+	u8* ldr_address;
+	u32 val;
 };
 
 typedef const u8* JumpTarget;
@@ -326,12 +353,20 @@ private:
 	u8 *code, *startcode;
 	u8 *lastCacheFlushEnd;
 	u32 condition;
+	std::vector<LiteralPool> currentLitPool;
 
-	void WriteStoreOp(u32 op, ARMReg dest, ARMReg src, Operand2 op2);
+	void WriteStoreOp(u32 Op, ARMReg Rt, ARMReg Rn, Operand2 op2, bool RegAdd);
 	void WriteRegStoreOp(u32 op, ARMReg dest, bool WriteBack, u16 RegList);
 	void WriteShiftedDataOp(u32 op, bool SetFlags, ARMReg dest, ARMReg src, ARMReg op2);
 	void WriteShiftedDataOp(u32 op, bool SetFlags, ARMReg dest, ARMReg src, Operand2 op2);
 	void WriteSignedMultiply(u32 Op, u32 Op2, u32 Op3, ARMReg dest, ARMReg r1, ARMReg r2);
+
+	u32 EncodeVd(ARMReg Vd);
+	u32 EncodeVn(ARMReg Vn);
+	u32 EncodeVm(ARMReg Vm);
+	void WriteVFPDataOp(u32 Op, ARMReg Vd, ARMReg Vn, ARMReg Vm);
+
+	void Write4OpMultiply(u32 op, ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
 
 	// New Ops
 	void WriteInstruction(u32 op, ARMReg Rd, ARMReg Rn, Operand2 Rm, bool SetFlags = false);
@@ -360,6 +395,11 @@ public:
 	void FlushIcacheSection(u8 *start, u8 *end);
 	u8 *GetWritableCodePtr();
 
+	void FlushLitPool();
+	void AddNewLit(u32 val);
+	bool TrySetValue_TwoOp(ARMReg reg, u32 val);
+
+	CCFlags GetCC() { return CCFlags(condition >> 28); }
 	void SetCC(CCFlags cond = CC_AL);
 
 	// Special purpose instructions
@@ -371,10 +411,10 @@ public:
 
 	// Hint instruction
 	void YIELD();
-	
+
 	// Do nothing
 	void NOP(int count = 1); //nop padding - TODO: fast nop slides, for amd and intel (check their manuals)
-	
+
 #ifdef CALL
 #undef CALL
 #endif
@@ -386,11 +426,12 @@ public:
 	FixupBranch BL();
 	FixupBranch BL_CC(CCFlags Cond);
 	void SetJumpTarget(FixupBranch const &branch);
-	
+
 	void B (const void *fnptr);
 	void B (ARMReg src);
 	void BL(const void *fnptr);
 	void BL(ARMReg src);
+	bool BLInRange(const void *fnptr);
 
 	void PUSH(const int num, ...);
 	void POP(const int num, ...);
@@ -408,13 +449,25 @@ public:
 	void ADDS(ARMReg dest, ARMReg src, Operand2 op2);
 	void ADC (ARMReg dest, ARMReg src, Operand2 op2);
 	void ADCS(ARMReg dest, ARMReg src, Operand2 op2);
+
 	void LSL (ARMReg dest, ARMReg src, Operand2 op2);
 	void LSL (ARMReg dest, ARMReg src, ARMReg op2);
 	void LSLS(ARMReg dest, ARMReg src, Operand2 op2);
 	void LSLS(ARMReg dest, ARMReg src, ARMReg op2);
+	void LSR (ARMReg dest, ARMReg src, Operand2 op2);
+	void LSRS(ARMReg dest, ARMReg src, Operand2 op2);
+	void LSR (ARMReg dest, ARMReg src, ARMReg op2);
+	void LSRS(ARMReg dest, ARMReg src, ARMReg op2);
+	void ASR (ARMReg dest, ARMReg src, Operand2 op2);
+	void ASRS(ARMReg dest, ARMReg src, Operand2 op2);
+	void ASR (ARMReg dest, ARMReg src, ARMReg op2);
+	void ASRS(ARMReg dest, ARMReg src, ARMReg op2);
+
 	void SBC (ARMReg dest, ARMReg src, Operand2 op2);
 	void SBCS(ARMReg dest, ARMReg src, Operand2 op2);
+	void RBIT(ARMReg dest, ARMReg src);
 	void REV (ARMReg dest, ARMReg src);
+	void REV16 (ARMReg dest, ARMReg src);
 	void RSC (ARMReg dest, ARMReg src, Operand2 op2);
 	void RSCS(ARMReg dest, ARMReg src, Operand2 op2);
 	void TST (             ARMReg src, Operand2 op2);
@@ -429,7 +482,7 @@ public:
 	void BICS(ARMReg dest, ARMReg src, Operand2 op2);
 	void MVN (ARMReg dest,             Operand2 op2);
 	void MVNS(ARMReg dest,             Operand2 op2);
-	void MOVW(ARMReg dest, 			   Operand2 op2);
+	void MOVW(ARMReg dest,             Operand2 op2);
 	void MOVT(ARMReg dest, Operand2 op2, bool TopBits = false);
 
 	// UDIV and SDIV are only available on CPUs that have 
@@ -439,54 +492,117 @@ public:
 
 	void MUL (ARMReg dest,	ARMReg src, ARMReg op2);
 	void MULS(ARMReg dest,	ARMReg src, ARMReg op2);
+
+	void UMULL(ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
+	void SMULL(ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
+
+	void UMLAL(ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
+	void SMLAL(ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
+
 	void SXTB(ARMReg dest, ARMReg op2);
 	void SXTH(ARMReg dest, ARMReg op2, u8 rotation = 0);
 	void SXTAH(ARMReg dest, ARMReg src, ARMReg op2, u8 rotation = 0);
+	void BFI(ARMReg rd, ARMReg rn, u8 lsb, u8 width);
+	void UBFX(ARMReg dest, ARMReg op2, u8 lsb, u8 width);
+	void CLZ(ARMReg rd, ARMReg rm);
+
 	// Using just MSR here messes with our defines on the PPC side of stuff (when this code was in dolphin...)
 	// Just need to put an underscore here, bit annoying.
 	void _MSR (bool nzcvq, bool g, Operand2 op2);
-	void _MSR (bool nzcvq, bool g, ARMReg src	   );
+	void _MSR (bool nzcvq, bool g, ARMReg src);
 	void MRS  (ARMReg dest);
 
 	// Memory load/store operations
-	void LDR (ARMReg dest, ARMReg src, Operand2 op2 = 0);
-	// Offset adds to the base register in LDR
-	void LDR (ARMReg dest, ARMReg base, ARMReg offset, bool Index, bool Add);
-	void LDRB(ARMReg dest, ARMReg src, Operand2 op2 = 0);
-	void STR (ARMReg dest, ARMReg src, Operand2 op2 = 0);
-	// Offset adds on to the destination register in STR
-	void STR (ARMReg dest, ARMReg base, ARMReg offset, bool Index, bool Add);
+	void LDR  (ARMReg dest, ARMReg base, Operand2 op2 = 0, bool RegAdd = true);
+	void LDRB (ARMReg dest, ARMReg base, Operand2 op2 = 0, bool RegAdd = true);
+	void LDRH (ARMReg dest, ARMReg base, Operand2 op2 = 0, bool RegAdd = true);
+	void LDRSB(ARMReg dest, ARMReg base, Operand2 op2 = 0, bool RegAdd = true);
+	void LDRSH(ARMReg dest, ARMReg base, Operand2 op2 = 0, bool RegAdd = true);
+	void STR  (ARMReg result, ARMReg base, Operand2 op2 = 0, bool RegAdd = true);
+	void STRB (ARMReg result, ARMReg base, Operand2 op2 = 0, bool RegAdd = true);
+	void STRH (ARMReg result, ARMReg base, Operand2 op2 = 0, bool RegAdd = true);
 
-	void STRB(ARMReg dest, ARMReg src, Operand2 op2 = 0);
 	void STMFD(ARMReg dest, bool WriteBack, const int Regnum, ...);
 	void LDMFD(ARMReg dest, bool WriteBack, const int Regnum, ...);
-	
+	void STMIA(ARMReg dest, bool WriteBack, const int Regnum, ...);
+	void LDMIA(ARMReg dest, bool WriteBack, const int Regnum, ...);
+	void STM(ARMReg dest, bool Add, bool Before, bool WriteBack, const int Regnum, ...);
+	void LDM(ARMReg dest, bool Add, bool Before, bool WriteBack, const int Regnum, ...);
+	void STMBitmask(ARMReg dest, bool Add, bool Before, bool WriteBack, const u16 RegList);
+	void LDMBitmask(ARMReg dest, bool Add, bool Before, bool WriteBack, const u16 RegList);
+
 	// Exclusive Access operations
 	void LDREX(ARMReg dest, ARMReg base);
-	// dest contains the result if the instruction managed to store the value
-	void STREX(ARMReg dest, ARMReg base, ARMReg op);
+	// result contains the result if the instruction managed to store the value
+	void STREX(ARMReg result, ARMReg base, ARMReg op);
 	void DMB ();
+	void SVC(Operand2 op);
 
 	// NEON and ASIMD instructions
 	// None of these will be created with conditional since ARM
 	// is deprecating conditional execution of ASIMD instructions.
-	// Some ASIMD instructions don't even have a conditional encoding.
-		
-	void VLDR(ARMReg dest, ARMReg Base, Operand2 op);
+	// ASIMD instructions don't even have a conditional encoding.
+
+	// Subtracts the base from the register to give us the real one
+	ARMReg SubBase(ARMReg Reg);	
+	// NEON Only
+	void VABD(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VADD(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VSUB(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm);
+
+	// VFP Only
+	void VLDR(ARMReg Dest, ARMReg Base, s16 offset);
+	void VSTR(ARMReg Src,  ARMReg Base, s16 offset);
+	void VCMP(ARMReg Vd, ARMReg Vm);
+	void VCMPE(ARMReg Vd, ARMReg Vm);
+	// Compares against zero
+	void VCMP(ARMReg Vd);
+	void VCMPE(ARMReg Vd);
+
+	void VNMLA(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VNMLS(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VNMUL(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VDIV(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VSQRT(ARMReg Vd, ARMReg Vm);
+
+	// NEON and VFP
+	void VADD(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VSUB(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VABS(ARMReg Vd, ARMReg Vm);
+	void VNEG(ARMReg Vd, ARMReg Vm);
+	void VMUL(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VMLA(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VMLS(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VMOV(ARMReg Dest, Operand2 op2);
+	void VMOV(ARMReg Dest, ARMReg Src, bool high);
 	void VMOV(ARMReg Dest, ARMReg Src);
+	void VCVT(ARMReg Dest, ARMReg Src, int flags);
+
+	// NEON, need to check for this (supported if VFP4 is supported)
+	void VCVTF32F16(ARMReg Dest, ARMReg Src);
+	void VCVTF16F32(ARMReg Dest, ARMReg Src);
+
+	void VMRS_APSR();
+	void VMRS(ARMReg Rt);
+	void VMSR(ARMReg Rt);
 
 	void QuickCallFunction(ARMReg scratchreg, void *func);
-	// Utility functions
-	void ARMABI_MOVI2R(ARMReg reg, u32 val);
-	void ARMABI_ShowConditions();
-	void ARMABI_Return();
 
-	void UpdateAPSR(bool NZCVQ, u8 Flags, bool GE, u8 GEval);
+	// Wrapper around MOVT/MOVW with fallbacks.
+	void MOVI2R(ARMReg reg, u32 val, bool optimize = true);
+	void MOVI2F(ARMReg dest, float val, ARMReg tempReg, bool negate = false);
+
+	void ADDI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch);
+	void ANDI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch);
+	void CMPI2R(ARMReg rs, u32 val, ARMReg scratch);
+	void TSTI2R(ARMReg rs, u32 val, ARMReg scratch);
+	void ORI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch);
+
 
 };  // class ARMXEmitter
 
 
-// Everything that needs to generate X86 code should inherit from this.
+// Everything that needs to generate machine code should inherit from this.
 // You get memory management for free, plus, you can use all the MOV etc functions without
 // having to prefix them with gen-> or something similar.
 class ARMXCodeBlock : public ARMXEmitter
@@ -519,12 +635,16 @@ public:
 	// Call this when shutting down. Don't rely on the destructor, even though it'll do the job.
 	void FreeCodeSpace()
 	{
+#ifdef __SYMBIAN32__
+		ResetExecutableMemory(region);
+#else
 		FreeMemoryPages(region, region_size);
+#endif
 		region = NULL;
 		region_size = 0;
 	}
 
-	bool IsInCodeSpace(u8 *ptr)
+	bool IsInSpace(u8 *ptr)
 	{
 		return ptr >= region && ptr < region + region_size;
 	}
@@ -533,7 +653,11 @@ public:
 	// Start over if you need to change the code (call FreeCodeSpace(), AllocCodeSpace()).
 	void WriteProtect()
 	{
-		WriteProtectMemory(region, region_size, true);		
+		WriteProtectMemory(region, region_size, true);
+	}
+	void UnWriteProtect()
+	{
+		UnWriteProtectMemory(region, region_size, false);
 	}
 
 	void ResetCodePtr()
@@ -545,7 +669,23 @@ public:
 	{
 		return region_size - (GetCodePtr() - region);
 	}
+
+	u8 *GetBasePtr() {
+		return region;
+	}
+
+	size_t GetOffset(u8 *ptr) {
+		return ptr - region;
+	}
 };
+
+// VFP Specific
+struct VFPEnc {
+	s16 opc1;
+	s16 opc2;
+};
+extern const VFPEnc VFPOps[16][2];
+extern const char *VFPOpNames[16];
 
 }  // namespace
 

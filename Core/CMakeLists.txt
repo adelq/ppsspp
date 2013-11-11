@@ -7,6 +7,8 @@ set(SRCS
   Dialog/PSPSaveDialog.cpp
   Dialog/SavedataParam.cpp
   Dialog/PSPOskDialog.cpp
+  Dialog/PSPGamedataInstallDialog.cpp
+  Dialog/PSPNetconfDialog.cpp
   MIPS/MIPS.cpp
   MIPS/MIPSAnalyst.cpp
   MIPS/MIPSCodeUtils.cpp
@@ -15,18 +17,23 @@ set(SRCS
   MIPS/MIPSDisVFPU.cpp
   MIPS/MIPSInt.cpp
   MIPS/MIPSIntVFPU.cpp
+  MIPS/MIPSStackWalk.cpp
   MIPS/MIPSTables.cpp
   MIPS/MIPSVFPUUtils.cpp
   MIPS/JitCommon/JitCommon.cpp
   ELF/ElfReader.cpp
   ELF/ParamSFO.cpp
   ELF/PrxDecrypter.cpp
+  Font/PGF.cpp
   HLE/HLE.cpp
   HLE/HLETables.cpp
   HLE/sceAtrac.cpp
   HLE/__sceAudio.cpp
   HLE/sceAudio.cpp
+  HLE/sceCcc.cpp
+  HLE/sceChnnlsv.cpp
   HLE/sceCtrl.cpp
+  HLE/sceDeflt.cpp
   HLE/sceDisplay.cpp
   HLE/sceDmac.cpp
   HLE/sceGe.cpp
@@ -35,6 +42,7 @@ set(SRCS
   HLE/sceHttp.cpp
   HLE/sceImpose.cpp
   HLE/sceIo.cpp
+  HLE/sceJpeg.cpp
   HLE/sceKernel.cpp
   HLE/sceKernelAlarm.cpp
   HLE/sceKernelEventFlag.cpp
@@ -50,6 +58,12 @@ set(SRCS
   HLE/sceKernelVTimer.cpp
   HLE/sceMpeg.cpp
   HLE/sceNet.cpp
+  HLE/sceNp.cpp
+  HLE/sceP3da.cpp
+  HLE/sceMd5.cpp
+  HLE/sceMp4.cpp
+  HLE/sceMp3.cpp
+  HLE/scePauth.cpp
   HLE/scePower.cpp
   HLE/scePsmf.cpp
   HLE/sceRtc.cpp
@@ -62,6 +76,8 @@ set(SRCS
   HLE/sceParseUri.cpp
   HLE/sceParseHttp.cpp
   HLE/sceVaudio.cpp
+  HLE/sceAudiocodec.cpp
+  HW/AsyncIOManager.cpp
   HW/MemoryStick.cpp
   HW/MediaEngine.cpp
   HW/SasAudio.cpp
@@ -69,6 +85,7 @@ set(SRCS
   FileSystems/ISOFileSystem.cpp
   FileSystems/DirectoryFileSystem.cpp
   FileSystems/MetaFileSystem.cpp
+  FileSystems/VirtualDiscFileSystem.cpp
   Util/BlockAllocator.cpp
   Util/ppge_atlas.cpp
   Util/PPGeDraw.cpp
@@ -83,6 +100,7 @@ set(SRCS
   PSPMixer.cpp
   System.cpp
   Core.cpp
+  ../git-version.cpp
 )
 
 if(ARM)
@@ -112,6 +130,17 @@ set(SRCS ${SRCS})
 add_library(core STATIC ${SRCS})
 target_link_libraries(core general common)
 target_link_libraries(core general base)
+
+# Generate git-version.cpp at build time.
+add_custom_target(GitVersion ALL
+	DEPENDS something_that_never_exists)
+add_custom_command(OUTPUT something_that_never_exists
+	COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/..
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/../git-version.cmake)
+
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../git-version.cpp
+	PROPERTIES GENERATED TRUE)
+add_dependencies(core GitVersion)
 
 if(UNIX)
   add_definitions(-fPIC)

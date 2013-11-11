@@ -15,14 +15,19 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
-#include "Setup.h"
 #include "Thread.h"
 #include "Common.h"
 
 #ifdef __APPLE__
 #include <mach/mach.h>
+#elif defined(ANDROID)
+#include <sys/syscall.h>
 #elif defined BSD4_4
 #include <pthread_np.h>
+#endif
+
+#ifdef BLACKBERRY
+#include <sys/neutrino.h>
 #endif
 
 #ifdef USE_BEGINTHREADEX
@@ -39,20 +44,20 @@ int CurrentThreadId()
 #elif defined __APPLE__
 	return mach_thread_self();
 #else
-	return 0;
+	return pthread_self();
 #endif
 }
 	
 #ifdef _WIN32
 
-void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
+bool SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
 {
-	SetThreadAffinityMask(thread, mask);
+	return SetThreadAffinityMask(thread, mask) != 0;
 }
 
-void SetCurrentThreadAffinity(u32 mask)
+bool SetCurrentThreadAffinity(u32 mask)
 {
-	SetThreadAffinityMask(GetCurrentThread(), mask);
+	return SetThreadAffinityMask(GetCurrentThread(), mask) != 0;
 }
 
 // Supporting functions
@@ -124,26 +129,37 @@ void EnableCrashingOnCrashes()
 
 #else // !WIN32, so must be POSIX threads
 
-void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
+bool SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
 {                
 #ifdef __APPLE__
-	thread_policy_set(pthread_mach_thread_np(thread),
-		THREAD_AFFINITY_POLICY, (integer_t *)&mask, 1);
-#elif (defined __linux__ || defined BSD4_4) && !defined(ANDROID)
+	return thread_policy_set(pthread_mach_thread_np(thread),
+		THREAD_AFFINITY_POLICY, (integer_t *)&mask, 1) == 0;
+#elif defined(ANDROID) || defined(BLACKBERRY)
+	return false;
+#elif (defined __linux__ || defined BSD4_4)
 	cpu_set_t cpu_set;
 	CPU_ZERO(&cpu_set);
                 
-	for (int i = 0; i != sizeof(mask) * 8; ++i)
+	for (int i = 0; i != sizeof(mask) * 8; ++i) {
 		if ((mask >> i) & 1)
 			CPU_SET(i, &cpu_set);
+	}
                 
-	pthread_setaffinity_np(thread, sizeof(cpu_set), &cpu_set);
+	return pthread_setaffinity_np(thread, sizeof(cpu_set), &cpu_set) == 0;
 #endif
+
+	return false;
 }
 
-void SetCurrentThreadAffinity(u32 mask)
+bool SetCurrentThreadAffinity(u32 mask)
 {
-	SetThreadAffinity(pthread_self(), mask);
+#ifdef BLACKBERRY
+	return ThreadCtl(_NTO_TCTL_RUNMASK, &mask) != -1;
+#elif defined(ANDROID)
+	return syscall(__NR_sched_setaffinity, gettid(), sizeof(mask), &mask) == 0;
+#else
+	return SetThreadAffinity(pthread_self(), mask);
+#endif
 }
 
 static pthread_key_t threadname_key;
@@ -171,6 +187,9 @@ static void ThreadnameKeyAlloc()
 
 void SetCurrentThreadName(const char* szThreadName)
 {
+#ifdef BLACKBERRY
+	pthread_setname_np(pthread_self(), szThreadName);
+#else
 	pthread_once(&threadname_key_once, ThreadnameKeyAlloc);
 
 	void* threadname;
@@ -178,6 +197,7 @@ void SetCurrentThreadName(const char* szThreadName)
 		free(threadname);
 
 	pthread_setspecific(threadname_key, strdup(szThreadName));
+#endif
 
 	INFO_LOG(COMMON, "%s(%s)\n", __FUNCTION__, szThreadName);
 }

@@ -17,12 +17,14 @@
 
 #pragma once
 
+int sceKernelCancelMutex(SceUID uid, int count, u32 numWaitThreadsPtr);
 int sceKernelCreateMutex(const char *name, u32 attr, int initialCount, u32 optionsPtr);
 int sceKernelDeleteMutex(SceUID id);
 int sceKernelLockMutex(SceUID id, int count, u32 timeoutPtr);
 int sceKernelLockMutexCB(SceUID id, int count, u32 timeoutPtr);
 int sceKernelTryLockMutex(SceUID id, int count);
 int sceKernelUnlockMutex(SceUID id, int count);
+int sceKernelReferMutexStatus(SceUID id, u32 infoAddr);
 
 int sceKernelCreateLwMutex(u32 workareaPtr, const char *name, u32 attr, int initialCount, u32 optionsPtr);
 int sceKernelDeleteLwMutex(u32 workareaPtr);
@@ -31,6 +33,8 @@ int sceKernelTryLockLwMutex_600(u32 workareaPtr, int count);
 int sceKernelLockLwMutex(u32 workareaPtr, int count, u32 timeoutPtr);
 int sceKernelLockLwMutexCB(u32 workareaPtr, int count, u32 timeoutPtr);
 int sceKernelUnlockLwMutex(u32 workareaPtr, int count);
+int sceKernelReferLwMutexStatusByID(SceUID uid, u32 infoPtr);
+int sceKernelReferLwMutexStatus(u32 workareaPtr, u32 infoPtr);
 
 void __KernelMutexTimeout(u64 userdata, int cyclesLate);
 void __KernelLwMutexTimeout(u64 userdata, int cyclesLate);

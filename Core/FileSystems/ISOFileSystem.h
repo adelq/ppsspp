@@ -18,21 +18,22 @@
 #pragma once
 
 #include <map>
-#include <string>
+#include <list>
 
 #include "FileSystem.h"
 
 #include "BlockDevices.h"
 
+bool parseLBN(std::string filename, u32 *sectorStart, u32 *readSize);
 
 class ISOFileSystem : public IFileSystem
 {
 public:
-	ISOFileSystem(IHandleAllocator *_hAlloc, BlockDevice *_blockDevice);
+	ISOFileSystem(IHandleAllocator *_hAlloc, BlockDevice *_blockDevice, std::string _restrictPath = "");
 	~ISOFileSystem();
 	void DoState(PointerWrap &p);
 	std::vector<PSPFileInfo> GetDirListing(std::string path);
-	u32      OpenFile(std::string filename, FileAccess access);
+	u32      OpenFile(std::string filename, FileAccess access, const char *devicename=NULL);
 	void     CloseFile(u32 handle);
 	size_t   ReadFile(u32 handle, u8 *pointer, s64 size);
 	size_t   SeekFile(u32 handle, s32 position, FileMove type);
@@ -43,8 +44,8 @@ public:
 	bool GetHostPath(const std::string &inpath, std::string &outpath) {return false;}
 	virtual bool MkDir(const std::string &dirname) {return false;}
 	virtual bool RmDir(const std::string &dirname) {return false;}
-	virtual bool RenameFile(const std::string &from, const std::string &to) {return false;}
-	virtual bool DeleteFile(const std::string &filename) {return false;}
+	virtual int  RenameFile(const std::string &from, const std::string &to) {return -1;}
+	virtual bool RemoveFile(const std::string &filename) {return false;}
 
 private:
 	struct TreeEntry
@@ -52,7 +53,7 @@ private:
 		TreeEntry(){}
 		~TreeEntry()
 		{
-			for (unsigned int i=0; i<children.size(); i++)
+			for (size_t i = 0; i < children.size(); ++i)
 				delete children[i];
 			children.clear();
 		}
@@ -62,7 +63,6 @@ private:
 		u32 startingPosition;
 		s64 size;
 		bool isDirectory;
-		bool isBlockSectorMode;  // "umd:" mode: all sizes and offsets are in 2048 byte chunks
 
 		TreeEntry *parent;
 		std::vector<TreeEntry*> children;
@@ -73,6 +73,7 @@ private:
 		TreeEntry *file;
 		unsigned int seekPos;  // TODO: Make 64-bit?
 		bool isRawSector;   // "/sce_lbn" mode
+		bool isBlockSectorMode;  // "umd:" mode: all sizes and offsets are in 2048 byte chunks
 		u32 sectorStart;
 		u32 openSize;
 	};
@@ -86,7 +87,10 @@ private:
 
 	TreeEntry entireISO;
 
-	void ReadDirectory(u32 startsector, u32 dirsize, TreeEntry *root);
+	// Don't use this in the emu, not savestated.
+	std::vector<std::string> restrictTree;
+
+	void ReadDirectory(u32 startsector, u32 dirsize, TreeEntry *root, size_t level);
 	TreeEntry *GetFromPath(std::string path, bool catchError=true);
 	std::string EntryFullPath(TreeEntry *e);
 };

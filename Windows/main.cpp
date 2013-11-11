@@ -15,27 +15,32 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <windows.h>
+#include <WinNls.h>
+#include "Common/CommonWindows.h"
 
 #include "file/vfs.h"
 #include "file/zip_read.h"
+#include "base/NativeApp.h"
+#include "util/text/utf8.h"
 
-#include "../Core/Config.h"
-#include "../Core/SaveState.h"
-#include "EmuThread.h"
+#include "Core/Config.h"
+#include "Core/SaveState.h"
+#include "Windows/EmuThread.h"
 #include "ext/disarm.h"
 
-#include "LogManager.h"
-#include "ConsoleListener.h"
-#include "Thread.h"
+#include "Common/LogManager.h"
+#include "Common/ConsoleListener.h"
+#include "Common/Thread.h"
 
 #include "Commctrl.h"
 
 #include "Windows/resource.h"
 
 #include "Windows/WndMainWindow.h"
+#include "Windows/Debugger/Debugger_Disasm.h"
 #include "Windows/Debugger/Debugger_MemoryDlg.h"
 #include "Windows/Debugger/Debugger_VFPUDlg.h"
+#include "Windows/GEDebugger/GEDebugger.h"
 
 #include "Windows/W32Util/DialogManager.h"
 
@@ -46,26 +51,184 @@
 #include "Windows/WindowsHost.h"
 #include "Windows/main.h"
 
-CDisasm *disasmWindow[MAX_CPUCOUNT];
-CMemoryDlg *memoryWindow[MAX_CPUCOUNT];
+CDisasm *disasmWindow[MAX_CPUCOUNT] = {0};
+CGEDebugger *geDebuggerWindow = 0;
+CMemoryDlg *memoryWindow[MAX_CPUCOUNT] = {0};
+
+static std::string langRegion;
+static std::string osName;
+
+void LaunchBrowser(const char *url) {
+	ShellExecute(NULL, L"open", ConvertUTF8ToWString(url).c_str(), NULL, NULL, SW_SHOWNORMAL);
+}
+
+void Vibrate(int length_ms) {
+	// Ignore on PC
+}
+
+bool DoesVersionMatchWindows(const u32 major, const u32 minor, const u32 spMajor = 0, const u32 spMinor = 0) {
+	u64 conditionMask = 0;
+	OSVERSIONINFOEX osvi;
+	ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
+
+	osvi.dwOSVersionInfoSize = sizeof(osvi);
+	osvi.dwMajorVersion = major;
+	osvi.dwMinorVersion = minor;
+	osvi.wServicePackMajor = spMajor;
+	osvi.wServicePackMinor = spMinor;
+	u32 op = VER_EQUAL;
+
+	VER_SET_CONDITION(conditionMask, VER_MAJORVERSION, op);
+	VER_SET_CONDITION(conditionMask, VER_MINORVERSION, op);
+	VER_SET_CONDITION(conditionMask, VER_SERVICEPACKMAJOR, op);
+	VER_SET_CONDITION(conditionMask, VER_SERVICEPACKMINOR, op);
+
+	const u32 typeMask = VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR | VER_SERVICEPACKMINOR;
+
+	return VerifyVersionInfo(&osvi, typeMask, conditionMask) != FALSE;
+}
+
+std::string GetWindowsVersion() {
+	const bool IsWindowsXPSP2 = DoesVersionMatchWindows(5, 1, 2, 0);
+	const bool IsWindowsXPSP3 = DoesVersionMatchWindows(5, 1, 3, 0);
+	const bool IsWindowsVista = DoesVersionMatchWindows(6, 0);
+	const bool IsWindowsVistaSP1 = DoesVersionMatchWindows(6, 0, 1, 0);
+	const bool IsWindowsVistaSP2 = DoesVersionMatchWindows(6, 0, 2, 0);
+	const bool IsWindows7 = DoesVersionMatchWindows(6, 1);
+	const bool IsWindows7SP1 = DoesVersionMatchWindows(6, 1, 1, 0);
+	const bool IsWindows8 = DoesVersionMatchWindows(6, 2);
+	const bool IsWindows8_1 = DoesVersionMatchWindows(6, 3);
+
+	if (IsWindowsXPSP2)
+		return "Microsoft Windows XP, Service Pack 2";
+
+	if (IsWindowsXPSP3)
+		return "Microsoft Windows XP, Service Pack 3";
+
+	if (IsWindowsVista)
+		return "Microsoft Windows Vista";
+
+	if (IsWindowsVistaSP1)
+		return "Microsoft Windows Vista, Service Pack 1";
+
+	if (IsWindowsVistaSP2)
+		return "Microsoft Windows Vista, Service Pack 2";
+
+	if (IsWindows7)
+		return "Microsoft Windows 7";
+
+	if (IsWindows7SP1)
+		return "Microsoft Windows 7, Service Pack 1";
+
+	if (IsWindows8)
+		return "Microsoft Windows 8";
+
+	if (IsWindows8_1)
+		return "Microsoft Windows 8.1";
+
+	return "Unsupported version of Microsoft Windows.";
+}
+
+std::string GetWindowsSystemArchitecture() {
+	SYSTEM_INFO sysinfo;
+	ZeroMemory(&sysinfo, sizeof(SYSTEM_INFO));
+	GetNativeSystemInfo(&sysinfo);
+
+	if (sysinfo.wProcessorArchitecture & PROCESSOR_ARCHITECTURE_AMD64)
+		return "(x64)";
+	// Need to check for equality here, since ANDing with 0 is always 0.
+	else if (sysinfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL)
+		return "(x86)";
+	else if (sysinfo.wProcessorArchitecture & PROCESSOR_ARCHITECTURE_ARM)
+		return "(ARM)";
+	else
+		return "(Unknown)";
+}
+
+std::string System_GetProperty(SystemProperty prop) {
+	switch (prop) {
+	case SYSPROP_NAME:
+		return osName;
+	case SYSPROP_LANGREGION:
+		return langRegion;
+	default:
+		return "";
+	}
+}
 
 int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLine, int iCmdShow)
 {
 	Common::EnableCrashingOnCrashes();
 
-	const char *fileToStart = NULL;
-	const char *fileToLog = NULL;
-	const char *stateToLoad = NULL;
-	bool hideLog = true;
+	wchar_t modulePath[MAX_PATH];
+	GetModuleFileName(NULL, modulePath, MAX_PATH);
+	for (size_t i = wcslen(modulePath) - 1; i > 0; i--) {
+		if (modulePath[i] == '\\') {
+			modulePath[i] = 0;
+			break;
+		}
+	}
+	SetCurrentDirectory(modulePath);
+	// GetCurrentDirectory(MAX_PATH, modulePath);  // for checking in the debugger
 
-#ifdef _DEBUG
-	hideLog = false;
+#ifndef _DEBUG
+	bool showLog = false;
+#else
+	bool showLog = false;
 #endif
 
-	g_Config.Load();
 	VFSRegister("", new DirectoryAssetReader("assets/"));
 	VFSRegister("", new DirectoryAssetReader(""));
 
+	wchar_t lcCountry[256];
+
+	// LOCALE_SNAME is only available in WinVista+
+	// Really should find a way to do this in XP too :/
+	if (0 != GetLocaleInfo(LOCALE_NAME_USER_DEFAULT, LOCALE_SNAME, lcCountry, 256)) {
+		langRegion = ConvertWStringToUTF8(lcCountry);
+		for (size_t i = 0; i < langRegion.size(); i++) {
+			if (langRegion[i] == '-')
+				langRegion[i] = '_';
+		}
+	} else {
+		langRegion = "en_US";
+	}
+
+	osName = GetWindowsVersion() + " " + GetWindowsSystemArchitecture();
+
+	const char *configFilename = NULL;
+	const char *configOption = "--config=";
+
+	const char *controlsConfigFilename = NULL;
+	const char *controlsOption = "--controlconfig=";
+
+	for (int i = 1; i < __argc; ++i)
+	{
+		if (__argv[i][0] == '\0')
+			continue;
+		if (__argv[i][0] == '-')
+		{
+			if (!strncmp(__argv[i], configOption, strlen(configOption)) && strlen(__argv[i]) > strlen(configOption)) {
+				configFilename = __argv[i] + strlen(configOption);
+			}
+			if (!strncmp(__argv[i], controlsOption, strlen(controlsOption)) && strlen(__argv[i]) > strlen(controlsOption)) {
+				controlsConfigFilename = __argv[i] + strlen(controlsOption);
+			}
+		}
+	}
+
+	// On Win32 it makes more sense to initialize the system directories here 
+	// because the next place it was called was in the EmuThread, and it's too late by then.
+	InitSysDirectories();
+
+	// Load config up here, because those changes below would be overwritten
+	// if it's not loaded here first.
+	g_Config.AddSearchPath("");
+	g_Config.AddSearchPath(GetSysDirectory(DIRECTORY_SYSTEM));
+	g_Config.SetDefaultPath(GetSysDirectory(DIRECTORY_SYSTEM));
+	g_Config.Load(configFilename, controlsConfigFilename);
+
+	// The rest is handled in NativeInit().
 	for (int i = 1; i < __argc; ++i)
 	{
 		if (__argv[i][0] == '\0')
@@ -75,52 +238,35 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 		{
 			switch (__argv[i][1])
 			{
-			case 'j':
-				g_Config.iCpuCore = CPU_JIT;
-				g_Config.bSaveSettings = false;
-				break;
-			case 'i':
-				g_Config.iCpuCore = CPU_INTERPRETER;
-				g_Config.bSaveSettings = false;
-				break;
-			case 'f':
-				g_Config.iCpuCore = CPU_FASTINTERPRETER;
-				g_Config.bSaveSettings = false;
-				break;
 			case 'l':
-				hideLog = false;
+				showLog = true;
+				g_Config.bEnableLogging = true;
 				break;
 			case 's':
 				g_Config.bAutoRun = false;
 				g_Config.bSaveSettings = false;
 				break;
-			case '-':
-				if (!strcmp(__argv[i], "--log") && i < __argc - 1)
-					fileToLog = __argv[++i];
-				if (!strncmp(__argv[i], "--log=", strlen("--log=")) && strlen(__argv[i]) > strlen("--log="))
-					fileToLog = __argv[i] + strlen("--log=");
-				if (!strcmp(__argv[i], "--state") && i < __argc - 1)
-					stateToLoad = __argv[++i];
-				if (!strncmp(__argv[i], "--state=", strlen("--state=")) && strlen(__argv[i]) > strlen("--state="))
-					stateToLoad = __argv[i] + strlen("--state=");
-				break;
 			}
-		}
-		else if (fileToStart == NULL)
-		{
-			fileToStart = __argv[i];
-			if (!File::Exists(fileToStart))
-			{
-				fprintf(stderr, "File not found: %s\n", fileToStart);
-				exit(1);
-			}
-		}
-		else
-		{
-			fprintf(stderr, "Can only boot one file");
-			exit(1);
+
+			if (!strncmp(__argv[i], "--fullscreen", strlen("--fullscreen")))
+				g_Config.bFullScreen = true;
+
+			if (!strncmp(__argv[i], "--windowed", strlen("--windowed")))
+				g_Config.bFullScreen = false;
 		}
 	}
+#ifdef _DEBUG
+	g_Config.bEnableLogging = true;
+#endif
+
+	LogManager::Init();
+	// Consider at least the following cases before changing this code:
+	//   - By default in Release, the console should be hidden by default even if logging is enabled.
+	//   - By default in Debug, the console should be shown by default.
+	//   - The -l switch is expected to show the log console, REGARDLESS of config settings.
+	//   - It should be possible to log to a file without showing the console.
+	LogManager::GetInstance()->GetConsoleListener()->Init(showLog, 150, 120, "PPSSPP Debug Console");
+
 
 	//Windows, API init stuff
 	INITCOMMONCONTROLSEX comm;
@@ -130,57 +276,67 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 	timeBeginPeriod(1);
 	MainWindow::Init(_hInstance);
 
-	HACCEL hAccelTable = LoadAccelerators(_hInstance, (LPCTSTR)IDR_ACCELS);
-	g_hPopupMenus = LoadMenu(_hInstance, (LPCSTR)IDR_POPUPMENUS);
+	g_hPopupMenus = LoadMenu(_hInstance, (LPCWSTR)IDR_POPUPMENUS);
 
 	MainWindow::Show(_hInstance, iCmdShow);
-	host = new WindowsHost(MainWindow::GetHWND(), MainWindow::GetDisplayHWND());
 
 	HWND hwndMain = MainWindow::GetHWND();
-	HMENU menu = GetMenu(hwndMain);
-
+	HWND hwndDisplay = MainWindow::GetDisplayHWND();
+	
 	//initialize custom controls
 	CtrlDisAsmView::init();
 	CtrlMemView::init();
 	CtrlRegisterList::init();
+	CGEDebugger::Init();
 
 	DialogManager::AddDlg(memoryWindow[0] = new CMemoryDlg(_hInstance, hwndMain, currentDebugMIPS));
 	DialogManager::AddDlg(vfpudlg = new CVFPUDlg(_hInstance, hwndMain, currentDebugMIPS));
 
-	MainWindow::Update();
-	MainWindow::UpdateMenus();
+	host = new WindowsHost(hwndMain, hwndDisplay);
+	host->SetWindowTitle(0);
 
-	LogManager::Init();
-	if (fileToLog != NULL)
-		LogManager::GetInstance()->ChangeFileLog(fileToLog);
-	LogManager::GetInstance()->GetConsoleListener()->Open(hideLog, 150, 120, "PPSSPP Debug Console");
-	LogManager::GetInstance()->SetLogLevel(LogTypes::G3D, LogTypes::LERROR);
-	if (fileToStart != NULL)
-	{
-		MainWindow::SetPlaying(fileToStart);
-		MainWindow::Update();
-		MainWindow::UpdateMenus();
+	MainWindow::CreateDebugWindows();
 
-		EmuThread_Start(fileToStart);
-	}
-	else
-		MainWindow::BrowseAndBoot();
+	// Emu thread is always running!
+	EmuThread_Start();
 
-	if (fileToStart != NULL && stateToLoad != NULL)
-		SaveState::Load(stateToLoad);
+	HACCEL hAccelTable = LoadAccelerators(_hInstance, (LPCTSTR)IDR_ACCELS);
+	HACCEL hDebugAccelTable = LoadAccelerators(_hInstance, (LPCTSTR)IDR_DEBUGACCELS);
 
 	//so.. we're at the message pump of the GUI thread
-	MSG msg;
-	while (GetMessage(&msg, NULL, 0, 0))	//while no quit
+	for (MSG msg; GetMessage(&msg, NULL, 0, 0); )	// for no quit
 	{
-		//DSound_UpdateSound();
+		if (msg.message == WM_KEYDOWN)
+		{
+			//hack to enable/disable menu command accelerate keys
+			MainWindow::UpdateCommands();
 
-		//hack to make it possible to get to main window from floating windows with Esc
-		if (msg.hwnd != hwndMain && msg.message==WM_KEYDOWN && msg.wParam==VK_ESCAPE)
-			BringWindowToTop(hwndMain);
+			//hack to make it possible to get to main window from floating windows with Esc
+			if (msg.hwnd != hwndMain && msg.wParam == VK_ESCAPE)
+				BringWindowToTop(hwndMain);
+		}
 
 		//Translate accelerators and dialog messages...
-		if (!TranslateAccelerator(hwndMain, hAccelTable, &msg))
+		HWND wnd;
+		HACCEL accel;
+		switch (g_activeWindow)
+		{
+		case WINDOW_MAINWINDOW:
+			wnd = hwndMain;
+			accel = hAccelTable;
+			break;
+		case WINDOW_CPUDEBUGGER:
+			wnd = disasmWindow[0]->GetDlgHandle();
+			accel = hDebugAccelTable;
+			break;
+		case WINDOW_GEDEBUGGER:
+		default:
+			wnd = 0;
+			accel = 0;
+			break;
+		}
+
+		if (!TranslateAccelerator(wnd, accel, &msg))
 		{
 			if (!DialogManager::IsDialogMessage(&msg))
 			{
@@ -191,10 +347,14 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 		}
 	}
 
-	LogManager::Shutdown();
+	VFSShutdown();
+
+	EmuThread_Stop();
+
 	DialogManager::DestroyAll();
 	timeEndPeriod(1);
-	g_Config.Save();
 	delete host;
+	g_Config.Save();
+	LogManager::Shutdown();
 	return 0;
 }

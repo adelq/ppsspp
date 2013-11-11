@@ -20,14 +20,17 @@
 #include "../Globals.h"
 #include "../MIPS/MIPS.h"
 
-#define STACKTOP 0x09F00000
-#define STACKSIZE 0x10000
-
 typedef void (* HLEFunc)();
 
 enum {
-	NOT_IN_INTERRUPT,
-	NOT_DISPATCH_SUSPENDED,
+	// The low 8 bits are a value, indicating special jit handling.
+	// Currently there are none.
+
+	// The remaining 24 bits are flags.
+	// Don't allow the call within an interrupt.  Not yet implemented.
+	HLE_NOT_IN_INTERRUPT = 1 << 8,
+	// Don't allow the call if dispatch or interrupts are disabled.
+	HLE_NOT_DISPATCH_SUSPENDED = 1 << 9,
 };
 
 struct HLEFunction
@@ -45,19 +48,22 @@ struct HLEModule
 	const HLEFunction *funcTable;
 };
 
+typedef char SyscallModuleName[32];
+
 struct Syscall
 {
-	char moduleName[32];
+	SyscallModuleName moduleName;
 	u32 symAddr;
 	u32 nid;
 };
 
 #define PARAM(n) currentMIPS->r[4+n]
+#define PARAMF(n) currentMIPS->f[12+n]
 #define RETURN(n) currentMIPS->r[2]=n
 #define RETURNF(fl) currentMIPS->f[0]=fl
 
 #ifndef ARRAY_SIZE
-#define ARRAY_SIZE(a) sizeof(a) / sizeof(a[0])
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
 #endif
 
 #include "FunctionWrappers.h"
@@ -85,13 +91,37 @@ void hleReSchedule(bool callbacks, const char *reason);
 void hleRunInterrupts();
 // Pause emulation after the syscall finishes.
 void hleDebugBreak();
+// Don't set temp regs to 0xDEADBEEF.
+void hleSkipDeadbeef();
+
+// Delays the result for usec microseconds, allowing other threads to run during this time.
+u32 hleDelayResult(u32 result, const char *reason, int usec);
+u64 hleDelayResult(u64 result, const char *reason, int usec);
+void hleEatCycles(int cycles);
+void hleEatMicro(int usec);
+
+inline int hleDelayResult(int result, const char *reason, int usec)
+{
+	return hleDelayResult((u32) result, reason, usec);
+}
+
+inline s64 hleDelayResult(s64 result, const char *reason, int usec)
+{
+	return hleDelayResult((u64) result, reason, usec);
+}
 
 void HLEInit();
 void HLEDoState(PointerWrap &p);
 void HLEShutdown();
 u32 GetNibByName(const char *module, const char *function);
 u32 GetSyscallOp(const char *module, u32 nib);
-void WriteSyscall(const char *module, u32 nib, u32 address);
-void CallSyscall(u32 op);
-void ResolveSyscall(const char *moduleName, u32 nib, u32 address);
+bool FuncImportIsSyscall(const char *module, u32 nib);
+bool WriteSyscall(const char *module, u32 nib, u32 address);
+void CallSyscall(MIPSOpcode op);
+void WriteFuncStub(u32 stubAddr, u32 symAddr);
+void WriteFuncMissingStub(u32 stubAddr, u32 nid);
+
+const HLEFunction *GetSyscallInfo(MIPSOpcode op);
+// For jit, takes arg: const HLEFunction *
+void *GetQuickSyscallFunc(MIPSOpcode op);
 

@@ -18,8 +18,7 @@
 #ifndef _THREAD_H_
 #define _THREAD_H_
 
-#include "StdThread.h"
-#include "StdMutex.h"
+#include "thread/thread.h"
 #include "StdConditionVariable.h"
 
 // Don't include common.h here as it will break LogManager
@@ -33,8 +32,8 @@
 #define INFINITE 0xffffffff
 #endif
 
-// Assume !ARM = x86
-#if !defined(ARM)
+// Assume !ARM && !MIPS = x86
+#if !defined(ARM) && !defined(MIPS)
 #include <xmmintrin.h>
 #endif
 
@@ -51,8 +50,8 @@ int CurrentThreadId();
 // In Windows 7 SP1 or later, stops Windows from swallowing crashes in WndProcs and other callbacks.
 void EnableCrashingOnCrashes();
 
-void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask);
-void SetCurrentThreadAffinity(u32 mask);
+bool SetThreadAffinity(std::thread::native_handle_type thread, u32 mask);
+bool SetCurrentThreadAffinity(u32 mask);
 	
 class Event
 {

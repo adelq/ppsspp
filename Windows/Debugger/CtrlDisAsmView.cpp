@@ -1,20 +1,30 @@
-// NOTE: Apologies for the quality of this code, this is really from pre-opensource Dolphin - that is, 2003.
+﻿// NOTE: Apologies for the quality of this code, this is really from pre-opensource Dolphin - that is, 2003.
 
-#include "../resource.h"
-#include "../../Core/MemMap.h"
-#include "../../Core/MIPS/JitCommon/JitCommon.h"
-#include "../W32Util/Misc.h"
-#include "../WndMainWindow.h"
-#include "../InputBox.h"
+#include "Windows/resource.h"
+#include "Core/MemMap.h"
+#include "Core/MIPS/JitCommon/JitCommon.h"
+#include "Windows/W32Util/Misc.h"
+#include "Windows/WndMainWindow.h"
+#include "Windows/InputBox.h"
 
-#include "CtrlDisAsmView.h"
-#include "Debugger_MemoryDlg.h"
-#include "../../Core/Debugger/SymbolMap.h"
-#include "../../globals.h"
-#include "../main.h"
+#include "Core/MIPS/MIPSAsm.h"
+#include "Core/MIPS/MIPSAnalyst.h"
+#include "Core/Config.h"
+#include "Windows/Debugger/CtrlDisAsmView.h"
+#include "Windows/Debugger/Debugger_MemoryDlg.h"
+#include "Windows/Debugger/DebuggerShared.h"
+#include "Windows/Debugger/BreakpointWindow.h"
+#include "Core/Debugger/SymbolMap.h"
+#include "Globals.h"
+#include "Windows/main.h"
 
-#include <windows.h>
+#include "Common/CommonWindows.h"
+#include "util/text/utf8.h"
+#include "ext/xxhash.h"
+
+#include <CommDlg.h>
 #include <tchar.h>
+#include <set>
 
 TCHAR CtrlDisAsmView::szClassName[] = _T("CtrlDisAsmView");
 extern HMENU g_hPopupMenus;
@@ -44,7 +54,167 @@ void CtrlDisAsmView::deinit()
 	//UnregisterClass(szClassName, hInst)
 }
 
+#define NUM_LANES 16
 
+bool compareBranchLines(BranchLine& a,BranchLine& b)
+{
+	return a.first < b.first;
+}
+
+void CtrlDisAsmView::scanFunctions()
+{
+	struct LaneInfo
+	{
+		bool used;
+		u32 end;
+	};
+
+	u32 pos = windowStart;
+	u32 windowEnd = windowStart+visibleRows*instructionSize;
+
+	visibleFunctionAddresses.clear();
+	strayLines.clear();
+
+	while (pos < windowEnd)
+	{
+		SymbolInfo info;
+		if (symbolMap.GetSymbolInfo(&info,pos))
+		{
+			u32 hash = XXH32(Memory::GetPointer(info.address),info.size,0xBACD7814);
+			u32 funcEnd = info.address+info.size;
+
+			visibleFunctionAddresses.push_back(info.address);
+
+			auto it = functions.find(info.address);
+			if (it != functions.end() && it->second.hash == hash)
+			{
+				// function is unchaged
+				pos = funcEnd;
+				continue;
+			}
+
+			DisassemblyFunction func;
+			func.hash = hash;
+
+			LaneInfo lanes[NUM_LANES];
+			for (int i = 0; i < NUM_LANES; i++)
+				lanes[i].used = false;
+
+
+			for (u32 funcPos = info.address; funcPos < funcEnd; funcPos += instructionSize)
+			{
+				MIPSAnalyst::MipsOpcodeInfo opInfo = MIPSAnalyst::GetOpcodeInfo(debugger,funcPos);
+
+				bool inFunction = (opInfo.branchTarget >= info.address && opInfo.branchTarget < funcEnd);
+				if (opInfo.isBranch && !opInfo.isBranchToRegister && !opInfo.isLinkedBranch && inFunction)
+				{
+					BranchLine line;
+					if (opInfo.branchTarget < funcPos)
+					{
+						line.first = opInfo.branchTarget;
+						line.second = funcPos;
+						line.type = LINE_UP;
+					} else {
+						line.first = funcPos;
+						line.second = opInfo.branchTarget;
+						line.type = LINE_DOWN;
+					}
+
+					func.lines.push_back(line);
+				}
+			}
+			
+			std::sort(func.lines.begin(),func.lines.end(),compareBranchLines);
+			for (size_t i = 0; i < func.lines.size(); i++)
+			{
+				for (int l = 0; l < NUM_LANES; l++)
+				{
+					if (func.lines[i].first > lanes[l].end)
+						lanes[l].used = false;
+				}
+
+				int lane = -1;
+				for (int l = 0; l < NUM_LANES; l++)
+				{
+					if (lanes[l].used == false)
+					{
+						lane = l;
+						break;
+					}
+				}
+
+				if (lane == -1)
+				{
+					// error
+					continue;
+				}
+
+				lanes[lane].end = func.lines[i].second;
+				lanes[lane].used = true;
+				func.lines[i].laneIndex = lane;
+			}
+
+			functions[info.address] = func;
+			pos = funcEnd;
+		} else {
+			MIPSAnalyst::MipsOpcodeInfo opInfo = MIPSAnalyst::GetOpcodeInfo(debugger,pos);
+			if (opInfo.isBranch && !opInfo.isBranchToRegister && !opInfo.isLinkedBranch)
+			{
+				BranchLine line;
+				if (opInfo.branchTarget < pos)
+				{
+					line.first = opInfo.branchTarget;
+					line.second = pos;
+					line.type = LINE_UP;
+				} else {
+					line.first = pos;
+					line.second = opInfo.branchTarget;
+					line.type = LINE_DOWN;
+				}
+
+				strayLines.push_back(line);
+			}
+
+			pos += instructionSize;
+		}
+	}
+
+	// calculate lanes for strayBranches
+	LaneInfo lanes[NUM_LANES];
+	for (int i = 0; i < NUM_LANES; i++)
+		lanes[i].used = false;
+	
+	std::sort(strayLines.begin(),strayLines.end(),compareBranchLines);
+	for (size_t i = 0; i < strayLines.size(); i++)
+	{
+		for (int l = 0; l < NUM_LANES; l++)
+		{
+			if (strayLines[i].first > lanes[l].end)
+				lanes[l].used = false;
+		}
+
+		int lane = -1;
+		for (int l = 0; l < NUM_LANES; l++)
+		{
+			if (lanes[l].used == false)
+			{
+				lane = l;
+				break;
+			}
+		}
+
+		if (lane == -1)
+		{
+			// error
+			continue;
+		}
+
+		lanes[lane].end = strayLines[i].second;
+		lanes[lane].used = true;
+		strayLines[i].laneIndex = lane;
+	}
+
+}
 
 LRESULT CALLBACK CtrlDisAsmView::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -74,12 +244,30 @@ LRESULT CALLBACK CtrlDisAsmView::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 	case WM_VSCROLL:
 		ccp->onVScroll(wParam,lParam);
 		break;
+	case WM_MOUSEWHEEL:
+		ccp->dontRedraw = false;
+		if (GET_WHEEL_DELTA_WPARAM(wParam) > 0)
+		{
+			ccp->scrollWindow(-3);
+		} else if (GET_WHEEL_DELTA_WPARAM(wParam) < 0) {
+			ccp->scrollWindow(3);
+		}
+		break;
 	case WM_ERASEBKGND:
 		return FALSE;
 	case WM_KEYDOWN:
 		ccp->onKeyDown(wParam,lParam);
-		break;
-	case WM_LBUTTONDOWN: SetFocus(hwnd); lmbDown=true; ccp->onMouseDown(wParam,lParam,1); break;
+		return 0;
+	case WM_CHAR:
+		ccp->onChar(wParam,lParam);
+		return 0;
+	case WM_SYSKEYDOWN:
+		ccp->onKeyDown(wParam,lParam);
+		return 0;		// return a value so that windows doesn't execute the standard syskey action
+	case WM_KEYUP:
+		ccp->onKeyUp(wParam,lParam);
+		return 0;
+	case WM_LBUTTONDOWN: lmbDown=true; ccp->onMouseDown(wParam,lParam,1); break;
 	case WM_RBUTTONDOWN: rmbDown=true; ccp->onMouseDown(wParam,lParam,2); break;
 	case WM_MOUSEMOVE:   ccp->onMouseMove(wParam,lParam,(lmbDown?1:0) | (rmbDown?2:0)); break;
 	case WM_LBUTTONUP:   lmbDown=false; ccp->onMouseUp(wParam,lParam,1); break;
@@ -93,6 +281,18 @@ LRESULT CALLBACK CtrlDisAsmView::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 		ccp->hasFocus=false;
 		ccp->redraw();
 		break;
+	case WM_GETDLGCODE:
+		if (lParam && ((MSG*)lParam)->message == WM_KEYDOWN)
+		{
+			switch (wParam)
+			{
+			case VK_TAB:
+				return DLGC_WANTMESSAGE;
+			default:
+				return DLGC_WANTCHARS|DLGC_WANTARROWS;
+			}
+		}
+		return DLGC_WANTCHARS|DLGC_WANTARROWS;
     default:
         break;
     }
@@ -115,15 +315,28 @@ CtrlDisAsmView::CtrlDisAsmView(HWND _wnd)
 	SetWindowLongPtr(wnd, GWLP_USERDATA, (LONG)this);
 	SetWindowLong(wnd, GWL_STYLE, GetWindowLong(wnd,GWL_STYLE) | WS_VSCROLL);
 	SetScrollRange(wnd, SB_VERT, -1,1,TRUE);
-	font = CreateFont(11,0,0,0,FW_DONTCARE,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,
-		"Lucida Console");
-	boldfont = CreateFont(11,0,0,0,FW_DEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,
-		"Lucida Console");
+
+	charWidth = g_Config.iFontWidth;
+	rowHeight = g_Config.iFontHeight+2;
+
+	font = CreateFont(rowHeight-2,charWidth,0,0,FW_DONTCARE,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,
+		L"Lucida Console");
+	boldfont = CreateFont(rowHeight-2,charWidth,0,0,FW_DEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,
+		L"Lucida Console");
 	curAddress=0;
-	rowHeight=12;
-	align=2;
-	selecting=false;
+	instructionSize=4;
 	showHex=false;
+	hasFocus = false;
+	dontRedraw = false;
+	keyTaken = false;
+
+	matchAddress = -1;
+	searching = false;
+	searchQuery = "";
+	windowStart = curAddress;
+	whiteBackground = false;
+	displaySymbols = true;
+	calculatePixelPositions();
 }
 
 
@@ -133,219 +346,371 @@ CtrlDisAsmView::~CtrlDisAsmView()
 	DeleteObject(boldfont);
 }
 
-void fillRect(HDC hdc, RECT *rect, COLORREF colour)
+COLORREF scaleColor(COLORREF color, float factor)
 {
-    COLORREF oldcr = SetBkColor(hdc, colour);
-    ExtTextOut(hdc, 0, 0, ETO_OPAQUE, rect, "", 0, 0);
-    SetBkColor(hdc, oldcr);
+	unsigned char r = color & 0xFF;
+	unsigned char g = (color >> 8) & 0xFF;
+	unsigned char b = (color >> 16) & 0xFF;
+
+	r = min(255,max((int)(r*factor),0));
+	g = min(255,max((int)(g*factor),0));
+	b = min(255,max((int)(b*factor),0));
+
+	return (color & 0xFF000000) | (b << 16) | (g << 8) | r;
+}
+
+bool CtrlDisAsmView::getDisasmAddressText(u32 address, char* dest, bool abbreviateLabels)
+{
+	if (displaySymbols)
+	{
+		const char* addressSymbol = debugger->findSymbolForAddress(address);
+		if (addressSymbol != NULL)
+		{
+			for (int k = 0; addressSymbol[k] != 0; k++)
+			{
+				// abbreviate long names
+				if (abbreviateLabels && k == 16 && addressSymbol[k+1] != 0)
+				{
+					*dest++ = '+';
+					break;
+				}
+				*dest++ = addressSymbol[k];
+			}
+			*dest++ = ':';
+			*dest = 0;
+			return true;
+		} else {
+			sprintf(dest,"    %08X",address);
+			return false;
+		}
+	} else {
+		sprintf(dest,"%08X %08X",address,Memory::Read_U32(address));
+		return false;
+	}
+}
+
+void CtrlDisAsmView::parseDisasm(const char* disasm, char* opcode, char* arguments)
+{
+	branchTarget = -1;
+	branchRegister = -1;
+
+	// copy opcode
+	while (*disasm != 0 && *disasm != '\t')
+	{
+		*opcode++ = *disasm++;
+	}
+	*opcode = 0;
+
+	if (*disasm++ == 0)
+	{
+		*arguments = 0;
+		return;
+	}
+
+	const char* jumpAddress = strstr(disasm,"->$");
+	const char* jumpRegister = strstr(disasm,"->");
+	while (*disasm != 0)
+	{
+		// parse symbol
+		if (disasm == jumpAddress)
+		{
+			sscanf(disasm+3,"%08x",&branchTarget);
+
+			const char* addressSymbol = debugger->findSymbolForAddress(branchTarget);
+			if (addressSymbol != NULL && displaySymbols)
+			{
+				arguments += sprintf(arguments,"%s",addressSymbol);
+			} else {
+				arguments += sprintf(arguments,"0x%08X",branchTarget);
+			}
+			
+			disasm += 3+8;
+			continue;
+		}
+
+		if (disasm == jumpRegister)
+		{
+			disasm += 2;
+			for (int i = 0; i < 32; i++)
+			{
+				if (strcasecmp(jumpRegister+2,debugger->GetRegName(0,i)) == 0)
+				{
+					branchRegister = i;
+					break;
+				}
+			}
+		}
+
+		if (*disasm == ' ')
+		{
+			disasm++;
+			continue;
+		}
+		*arguments++ = *disasm++;
+	}
+
+	*arguments = 0;
+}
+
+void CtrlDisAsmView::assembleOpcode(u32 address, std::string defaultText)
+{
+	u32 encoded;
+
+	if (Core_IsStepping() == false) {
+		MessageBox(wnd,L"Cannot change code while the core is running!",L"Error",MB_OK);
+		return;
+	}
+	std::string op;
+	bool result = InputBox_GetString(MainWindow::GetHInstance(),wnd,L"Assemble opcode",defaultText, op, false);
+	if (!result)
+		return;
+
+	result = MIPSAsm::MipsAssembleOpcode(op.c_str(),debugger,address,encoded);
+	if (result == true)
+	{
+		Memory::Write_U32(encoded, address);
+		// In case this is a delay slot or combined instruction, clear cache above it too.
+		if (MIPSComp::jit)
+			MIPSComp::jit->ClearCacheAt(address - 4, 8);
+		scanFunctions();
+
+		if (address == curAddress)
+			gotoAddr(curAddress+4);
+
+		redraw();
+	} else {
+		std::wstring error = ConvertUTF8ToWString(MIPSAsm::GetAssembleError());
+		MessageBox(wnd,error.c_str(),L"Error",MB_OK);
+	}
 }
 
 
-u32 halfAndHalf(u32 a, u32 b)
+void CtrlDisAsmView::drawBranchLine(HDC hdc, BranchLine& line)
 {
-	return ((a>>1)&0x7f7f7f7f) + ((b>>1)&0x7f7f7f7f);	
+	HPEN pen;
+	u32 windowEnd = windowStart+visibleRows*instructionSize;
+	
+	int topY;
+	int bottomY;
+	if (line.first < windowStart)
+	{
+		topY = -1;
+	} else if (line.first >= windowEnd)
+	{
+		topY = rect.bottom+1;
+	} else {
+		int row = (line.first-windowStart)/instructionSize;
+		topY = row*rowHeight + rowHeight/2;
+	}
+			
+	if (line.second < windowStart)
+	{
+		bottomY = -1;
+	} else if (line.second >= windowEnd)
+	{
+		bottomY = rect.bottom+1;
+	} else {
+		int row = (line.second-windowStart)/instructionSize;
+		bottomY = row*rowHeight + rowHeight/2;
+	}
+
+	if ((topY < 0 && bottomY < 0) || (topY > rect.bottom && bottomY > rect.bottom))
+	{
+		return;
+	}
+
+	// highlight line in a different color if it affects the currently selected opcode
+	if (line.first == curAddress || line.second == curAddress)
+	{
+		pen = CreatePen(0,0,0x257AFA);
+	} else {
+		pen = CreatePen(0,0,0xFF3020);
+	}
+	
+	HPEN oldPen = (HPEN) SelectObject(hdc,pen);
+	int x = pixelPositions.arrowsStart+line.laneIndex*8;
+
+	if (topY < 0)	// first is not visible, but second is
+	{
+		MoveToEx(hdc,x-2,bottomY,0);
+		LineTo(hdc,x+2,bottomY);
+		LineTo(hdc,x+2,0);
+
+		if (line.type == LINE_DOWN)
+		{
+			MoveToEx(hdc,x,bottomY-4,0);
+			LineTo(hdc,x-4,bottomY);
+			LineTo(hdc,x+1,bottomY+5);
+		}
+	} else if (bottomY > rect.bottom) // second is not visible, but first is
+	{
+		MoveToEx(hdc,x-2,topY,0);
+		LineTo(hdc,x+2,topY);
+		LineTo(hdc,x+2,rect.bottom);
+				
+		if (line.type == LINE_UP)
+		{
+			MoveToEx(hdc,x,topY-4,0);
+			LineTo(hdc,x-4,topY);
+			LineTo(hdc,x+1,topY+5);
+		}
+	} else { // both are visible
+		if (line.type == LINE_UP)
+		{
+			MoveToEx(hdc,x-2,bottomY,0);
+			LineTo(hdc,x+2,bottomY);
+			LineTo(hdc,x+2,topY);
+			LineTo(hdc,x-4,topY);
+			
+			MoveToEx(hdc,x,topY-4,0);
+			LineTo(hdc,x-4,topY);
+			LineTo(hdc,x+1,topY+5);
+		} else {
+			MoveToEx(hdc,x-2,topY,0);
+			LineTo(hdc,x+2,topY);
+			LineTo(hdc,x+2,bottomY);
+			LineTo(hdc,x-4,bottomY);
+			
+			MoveToEx(hdc,x,bottomY-4,0);
+			LineTo(hdc,x-4,bottomY);
+			LineTo(hdc,x+1,bottomY+5);
+		}
+	}
+
+	SelectObject(hdc,oldPen);
+	DeleteObject(pen);
 }
 
-
-//Yeah this truly turned into a mess with the latest additions.. but it sure looks nice ;)
 void CtrlDisAsmView::onPaint(WPARAM wParam, LPARAM lParam)
 {
-	struct branch
-	{
-		int src,dst,srcAddr;
-		bool conditional;
-	};
-	branch branches[256];
-	int numBranches=0;
+	if (!debugger->isAlive()) return;
 
-	
-
-	GetClientRect(wnd, &rect);
 	PAINTSTRUCT ps;
-	HDC hdc;
-	
-	hdc = BeginPaint(wnd, &ps);
-	// TODO: Add any drawing code here...
-	int width = rect.right;
-	int numRows=(rect.bottom/rowHeight)/2+1;
-	//numRows=(numRows&(~1)) + 1;
-	SetBkMode(hdc, TRANSPARENT);
-	DWORD bgColor = 0xffffff;
-	HPEN nullPen=CreatePen(0,0,bgColor);
-	HPEN currentPen=CreatePen(0,0,0);
-	HPEN selPen=CreatePen(0,0,0x808080);
-	HPEN condPen=CreatePen(0,0,0xFF3020);
+	HDC actualHdc = BeginPaint(wnd, &ps);
+	HDC hdc = CreateCompatibleDC(actualHdc);
+	HBITMAP hBM = CreateCompatibleBitmap(actualHdc, rect.right-rect.left, rect.bottom-rect.top);
+	SelectObject(hdc, hBM);
 
-	LOGBRUSH lbr;
-	lbr.lbHatch=0; lbr.lbStyle=0; 
-	lbr.lbColor=bgColor;
-	HBRUSH nullBrush=CreateBrushIndirect(&lbr);
-	lbr.lbColor=0xFFEfE8;
-	HBRUSH currentBrush=CreateBrushIndirect(&lbr);
-	lbr.lbColor=0x70FF70;
-	HBRUSH pcBrush=CreateBrushIndirect(&lbr);
+	SetBkMode(hdc, TRANSPARENT);
+
+	HPEN nullPen=CreatePen(0,0,0xffffff);
+	HBRUSH nullBrush=CreateSolidBrush(0xffffff);
+	HBRUSH currentBrush=CreateSolidBrush(0xFFEfE8);
 
 	HPEN oldPen=(HPEN)SelectObject(hdc,nullPen);
 	HBRUSH oldBrush=(HBRUSH)SelectObject(hdc,nullBrush);
-
-   
 	HFONT oldFont = (HFONT)SelectObject(hdc,(HGDIOBJ)font);
-	HICON breakPoint = (HICON)LoadIcon(GetModuleHandle(0),(LPCSTR)IDI_STOP);
-	HICON breakPointDisable = (HICON)LoadIcon(GetModuleHandle(0),(LPCSTR)IDI_STOPDISABLE);
-	int i;
-	curAddress&=~(align-1);
+	HICON breakPoint = (HICON)LoadIcon(GetModuleHandle(0),(LPCWSTR)IDI_STOP);
+	HICON breakPointDisable = (HICON)LoadIcon(GetModuleHandle(0),(LPCWSTR)IDI_STOPDISABLE);
 
-	align=(debugger->getInstructionSize(0));
-	for (i=-numRows; i<=numRows; i++)
+	for (int i = 0; i < visibleRows; i++)
 	{
-		unsigned int address=curAddress + i*align;
+		unsigned int address=windowStart + i*instructionSize;
+		MIPSAnalyst::MipsOpcodeInfo info = MIPSAnalyst::GetOpcodeInfo(debugger,address);
 
-		int rowY1 = rect.bottom/2 + rowHeight*i - rowHeight/2;
-		int rowY2 = rect.bottom/2 + rowHeight*i + rowHeight/2;
-		char temp[256];
-		sprintf(temp,"%08x",address);
+		int rowY1 = rowHeight*i;
+		int rowY2 = rowHeight*(i+1);
 
-		lbr.lbColor=marker==address?0xffeee0:debugger->getColor(address);
-		u32 bg = lbr.lbColor;
-		//SelectObject(hdc,currentBrush);
-		SelectObject(hdc,nullPen);
-		Rectangle(hdc,0,rowY1,16,rowY2);
-
-		if (selecting && address == selection)
-			SelectObject(hdc,selPen);
-		else
-			SelectObject(hdc,i==0 ? currentPen : nullPen);
-
-		HBRUSH mojsBrush=CreateBrushIndirect(&lbr);
-		SelectObject(hdc,mojsBrush);
+		// draw background
+		COLORREF backgroundColor = whiteBackground ? 0xFFFFFF : debugger->getColor(address);
+		COLORREF textColor = 0x000000;
 
 		if (address == debugger->getPC())
-			SelectObject(hdc,pcBrush);
-		//else
-		//	SelectObject(hdc,i==0 ? currentBrush : nullBrush);
-
-		Rectangle(hdc,16,rowY1,width,rowY2);
-		SelectObject(hdc,currentBrush);
-		DeleteObject(mojsBrush);
-		SetTextColor(hdc,halfAndHalf(bg,0));
-		TextOut(hdc,17,rowY1,temp,strlen(temp));
-		SetTextColor(hdc,0x000000);
-		if (debugger->isAlive())
 		{
-			const TCHAR *dizz = debugger->disasm(address, align);
-      char dis[512];
-      strcpy(dis, dizz);
-			TCHAR *dis2 = strchr(dis,'\t');
-			TCHAR desc[256]="";
-			if (dis2)
+			backgroundColor = scaleColor(backgroundColor,1.05f);
+		}
+
+		if (address >= selectRangeStart && address < selectRangeEnd && searching == false)
+		{
+			if (hasFocus)
 			{
-				*dis2=0;
-				dis2++;
-				const char *mojs=strstr(dis2,"->$");
-				if (mojs)
-				{
-					for (int i=0; i<8; i++)
-					{
-						bool found=false;
-						for (int j=0; j<22; j++)
-						{
-							if (mojs[i+3]=="0123456789ABCDEFabcdef"[j])
-								found=true;
-						}
-						if (!found)
-						{
-							mojs=0;
-							break;
-						}
-					}
-				}
-				if (mojs)
-				{
-					int offs;
-					sscanf(mojs+3,"%08x",&offs);
-					branches[numBranches].src=rowY1 + rowHeight/2;
-					branches[numBranches].srcAddr=address/align;
-					branches[numBranches].dst=(int)(rowY1+((__int64)offs-(__int64)address)*rowHeight/align + rowHeight/2);
-					branches[numBranches].conditional = (dis[1]!=0); //unconditional 'b' branch
-					numBranches++;
-					const char *t = debugger->getDescription(offs);
-					if (memcmp(t,"z_",2)==0)
-						t+=2;
-					if (memcmp(t,"zz_",3)==0)
-						t+=3;
-					sprintf(desc,"-->%s", t);
-					SetTextColor(hdc,0x600060);
-				}
-				else
-					SetTextColor(hdc,0x000000);
-				TextOut(hdc,149,rowY1,dis2,strlen(dis2));
+				backgroundColor = address == curAddress ? 0xFF8822 : 0xFF9933;
+				textColor = 0xFFFFFF;
+			} else {
+				backgroundColor = 0xC0C0C0;
 			}
-			SetTextColor(hdc,0x007000);
-			SelectObject(hdc,boldfont);
-			TextOut(hdc,84,rowY1,dis,strlen(dis));
-			SelectObject(hdc,font);
-			if (desc[0]==0)
-			{
-				const char *t = debugger->getDescription(address);
-				if (memcmp(t,"z_",2)==0)
-					t+=2;
-				if (memcmp(t,"zz_",3)==0)
-					t+=3;
-				strcpy(desc,t);
-			}
-			if (memcmp(desc,"-->",3) == 0)
-				SetTextColor(hdc,0x0000FF);
-			else
-				SetTextColor(hdc,halfAndHalf(halfAndHalf(bg,0),bg));
-			//char temp[256];
-			//UnDecorateSymbolName(desc,temp,255,UNDNAME_COMPLETE);
-			if (strlen(desc))
-				TextOut(hdc,max(280,width/3+190),rowY1,desc,strlen(desc));
-			if (debugger->isBreakpoint(address))
-			{
-				DrawIconEx(hdc,2,rowY1,breakPoint,32,32,0,0,DI_NORMAL);
-			}
+		}
+		
+		HBRUSH backgroundBrush = CreateSolidBrush(backgroundColor);
+		HPEN backgroundPen = CreatePen(0,0,backgroundColor);
+		SelectObject(hdc,backgroundBrush);
+		SelectObject(hdc,backgroundPen);
+		Rectangle(hdc,0,rowY1,rect.right,rowY1+rowHeight);
+		
+		SelectObject(hdc,currentBrush);
+		SelectObject(hdc,nullPen);
+
+		DeleteObject(backgroundBrush);
+		DeleteObject(backgroundPen);
+
+		// display address/symbol
+		bool enabled;
+		if (CBreakPoints::IsAddressBreakPoint(address,&enabled))
+		{
+			if (enabled) textColor = 0x0000FF;
+			int yOffset = max(-1,(rowHeight-14+1)/2);
+			if (!enabled) yOffset++;
+			DrawIconEx(hdc,2,rowY1+1+yOffset,enabled ? breakPoint : breakPointDisable,32,32,0,0,DI_NORMAL);
+		}
+		SetTextColor(hdc,textColor);
+
+		char addressText[64];
+		getDisasmAddressText(address,addressText,true);
+		TextOutA(hdc,pixelPositions.addressStart,rowY1+2,addressText,(int)strlen(addressText));
+
+		if (address == debugger->getPC())
+		{
+			TextOut(hdc,pixelPositions.opcodeStart-8,rowY1,L"■",1);
+		}
+
+		// display opcode
+		char opcode[64],arguments[256];
+		const char *dizz = debugger->disasm(address, instructionSize);
+		parseDisasm(dizz,opcode,arguments);
+
+		// display whether the condition of a branch is met
+		if (info.isConditional && address == debugger->getPC())
+		{
+			strcat(arguments,info.conditionMet ? "  ; true" : "  ; false");
+		}
+
+		int length = (int) strlen(arguments);
+		if (length != 0) TextOutA(hdc,pixelPositions.argumentsStart,rowY1+2,arguments,length);
+			
+		SelectObject(hdc,boldfont);
+		TextOutA(hdc,pixelPositions.opcodeStart,rowY1+2,opcode,(int)strlen(opcode));
+		SelectObject(hdc,font);
+	}
+
+	for (size_t i = 0; i < visibleFunctionAddresses.size(); i++)
+	{
+		auto it = functions.find(visibleFunctionAddresses[i]);
+		if (it == functions.end()) continue;
+		DisassemblyFunction& func = it->second;
+		
+		for (size_t l = 0; l < func.lines.size(); l++)
+		{
+			drawBranchLine(hdc,func.lines[l]);
 		}
 	}
-	for (i=0; i<numBranches; i++)
+
+	for (size_t i = 0; i < strayLines.size(); i++)
 	{
-		SelectObject(hdc,branches[i].conditional ? condPen : currentPen);
-		int x=280+(branches[i].srcAddr%9)*8;
-		MoveToEx(hdc,x-2,branches[i].src,0);
-
-		if (branches[i].dst<rect.bottom+200 && branches[i].dst>-200)
-		{
-			LineTo(hdc,x+2,branches[i].src);
-			LineTo(hdc,x+2,branches[i].dst);
-			LineTo(hdc,x-4,branches[i].dst);
-			
-			MoveToEx(hdc,x,branches[i].dst-4,0);
-			LineTo(hdc,x-4,branches[i].dst);
-			LineTo(hdc,x+1,branches[i].dst+5);
-		}
-		else
-		{
-			LineTo(hdc,x+4,branches[i].src);
-			//MoveToEx(hdc,x+2,branches[i].dst-4,0);
-			//LineTo(hdc,x+6,branches[i].dst);
-			//LineTo(hdc,x+1,branches[i].dst+5);
-		}
-		//LineTo(hdc,x,branches[i].dst+4);
-
-		//LineTo(hdc,x-2,branches[i].dst);
+		drawBranchLine(hdc,strayLines[i]);
 	}
 
 	SelectObject(hdc,oldFont);
 	SelectObject(hdc,oldPen);
 	SelectObject(hdc,oldBrush);
-	
+
+	// copy bitmap to the actual hdc
+	BitBlt(actualHdc, 0, 0, rect.right, rect.bottom, hdc, 0, 0, SRCCOPY);
+	DeleteObject(hBM);
+	DeleteDC(hdc);
+
 	DeleteObject(nullPen);
-	DeleteObject(currentPen);
-	DeleteObject(selPen);
-	DeleteObject(condPen);
 
 	DeleteObject(nullBrush);
-	DeleteObject(pcBrush);
 	DeleteObject(currentBrush);
 	
 	DestroyIcon(breakPoint);
@@ -358,88 +723,308 @@ void CtrlDisAsmView::onPaint(WPARAM wParam, LPARAM lParam)
 
 void CtrlDisAsmView::onVScroll(WPARAM wParam, LPARAM lParam)
 {
-	RECT rect;
-	GetClientRect(this->wnd, &rect);
-	int page=(rect.bottom/rowHeight)/2-1;
-
 	switch (wParam & 0xFFFF)
 	{
 	case SB_LINEDOWN:
-		curAddress+=align;
+		windowStart += instructionSize;
 		break;
 	case SB_LINEUP:
-		curAddress-=align;
+		windowStart -= instructionSize;
 		break;
 	case SB_PAGEDOWN:
-		curAddress+=page*align;
+		windowStart += visibleRows*instructionSize;
 		break;
 	case SB_PAGEUP:
-		curAddress-=page*align;
+		windowStart -= visibleRows*instructionSize;
 		break;
 	default:
 		return;
 	}
 	redraw();
+}
+
+void CtrlDisAsmView::followBranch()
+{
+	MIPSAnalyst::MipsOpcodeInfo info = MIPSAnalyst::GetOpcodeInfo(debugger,curAddress);
+
+	if (info.isBranch)
+	{
+		jumpStack.push_back(curAddress);
+		gotoAddr(info.branchTarget);
+	} else if (info.hasRelevantAddress)
+	{
+		// well, not  exactly a branch, but we can do something anyway
+		SendMessage(GetParent(wnd),WM_DEB_GOTOHEXEDIT,info.releventAddress,0);
+		SetFocus(wnd);
+	}
+}
+
+void CtrlDisAsmView::onChar(WPARAM wParam, LPARAM lParam)
+{
+	if (keyTaken) return;
+
+	char str[2];
+	str[0] = wParam;
+	str[1] = 0;
+	assembleOpcode(curAddress,str);
+}
+
+
+void CtrlDisAsmView::editBreakpoint()
+{
+	BreakpointWindow win(wnd,debugger);
+
+	bool exists = false;
+	if (CBreakPoints::IsAddressBreakPoint(curAddress))
+	{
+		auto breakpoints = CBreakPoints::GetBreakpoints();
+		for (size_t i = 0; i < breakpoints.size(); i++)
+		{
+			if (breakpoints[i].addr == curAddress)
+			{
+				win.loadFromBreakpoint(breakpoints[i]);
+				exists = true;
+				break;
+			}
+		}
+	}
+
+	if (!exists)
+		win.initBreakpoint(curAddress);
+
+	if (win.exec())
+	{
+		if (exists)
+			CBreakPoints::RemoveBreakPoint(curAddress);
+		win.addBreakpoint();
+	}
 }
 
 void CtrlDisAsmView::onKeyDown(WPARAM wParam, LPARAM lParam)
 {
-	RECT rect;
-	GetClientRect(this->wnd, &rect);
-	int page=(rect.bottom/rowHeight)/2-1;
+	dontRedraw = false;
+	u32 windowEnd = windowStart+visibleRows*instructionSize;
+	keyTaken = true;
 
-	switch (wParam & 0xFFFF)
+	if (KeyDownAsync(VK_CONTROL))
 	{
-	case VK_DOWN:
-		curAddress+=align;
-		break;
-	case VK_UP:
-		curAddress-=align;
-		break;
-	case VK_NEXT:
-		curAddress+=page*align;
-		break;
-	case VK_PRIOR:
-		curAddress-=page*align;
-		break;
-	default:
-		return;
+		switch (tolower(wParam & 0xFFFF))
+		{
+		case 'f':
+		case 's':
+			search(false);
+			break;
+		case 'c':
+		case VK_INSERT:
+			copyInstructions(selectRangeStart, selectRangeEnd, true);
+			break;
+		case 'x':
+			disassembleToFile();
+			break;
+		case 'a':
+			assembleOpcode(curAddress,"");
+			break;
+		case 'g':
+			{
+				u32 addr;
+				if (executeExpressionWindow(wnd,debugger,addr) == false) return;
+				gotoAddr(addr);
+			}
+			break;
+		case 'e':	// edit breakpoint
+			editBreakpoint();
+			break;
+		case 'd':	// toogle breakpoint enabled
+			toggleBreakpoint(true);
+			break;
+		}
+	} else {
+		switch (wParam & 0xFFFF)
+		{
+		case VK_DOWN:
+			setCurAddress(curAddress + instructionSize, KeyDownAsync(VK_SHIFT));
+			scrollAddressIntoView();
+			break;
+		case VK_UP:
+			setCurAddress(curAddress - instructionSize, KeyDownAsync(VK_SHIFT));
+			scrollAddressIntoView();
+			break;
+		case VK_NEXT:
+			if (curAddress != windowEnd - instructionSize && curAddressIsVisible()) {
+				setCurAddress(windowEnd - instructionSize, KeyDownAsync(VK_SHIFT));
+				scrollAddressIntoView();
+			} else {
+				setCurAddress(curAddress + visibleRows * instructionSize, KeyDownAsync(VK_SHIFT));
+				scrollAddressIntoView();
+			}
+			break;
+		case VK_PRIOR:
+			if (curAddress != windowStart && curAddressIsVisible()) {
+				setCurAddress(windowStart, KeyDownAsync(VK_SHIFT));
+				scrollAddressIntoView();
+			} else {
+				setCurAddress(curAddress - visibleRows * instructionSize, KeyDownAsync(VK_SHIFT));
+				scrollAddressIntoView();
+			}
+			break;
+		case VK_LEFT:
+			if (jumpStack.empty())
+			{
+				gotoPC();
+			} else {
+				u32 addr = jumpStack[jumpStack.size()-1];
+				jumpStack.pop_back();
+				gotoAddr(addr);
+			}
+			return;
+		case VK_RIGHT:
+			followBranch();
+			return;
+		case VK_TAB:
+			displaySymbols = !displaySymbols;
+			break;
+		case VK_SPACE:
+			debugger->toggleBreakpoint(curAddress);
+			break;
+		case VK_F3:
+			search(true);
+			break;
+		default:
+			keyTaken = false;
+			return;
+		}
 	}
 	redraw();
 }
 
+void CtrlDisAsmView::onKeyUp(WPARAM wParam, LPARAM lParam)
+{
+
+}
+
+void CtrlDisAsmView::scrollAddressIntoView()
+{
+	u32 windowEnd = windowStart + visibleRows * instructionSize;
+
+	if (curAddress < windowStart)
+		windowStart = curAddress;
+	else if (curAddress >= windowEnd)
+		windowStart = curAddress - visibleRows * instructionSize + instructionSize;
+
+	scanFunctions();
+}
+
+bool CtrlDisAsmView::curAddressIsVisible()
+{
+	u32 windowEnd = windowStart + visibleRows * instructionSize;
+	return curAddress >= windowStart && curAddress < windowEnd;
+}
 
 void CtrlDisAsmView::redraw()
 {
+	if (dontRedraw == true) return;
+
+	GetClientRect(wnd, &rect);
+	visibleRows = rect.bottom/rowHeight;
+
 	InvalidateRect(wnd, NULL, FALSE);
 	UpdateWindow(wnd); 
 }
 
+void CtrlDisAsmView::toggleBreakpoint(bool toggleEnabled)
+{
+	bool enabled;
+	if (CBreakPoints::IsAddressBreakPoint(curAddress,&enabled))
+	{
+		if (!enabled)
+		{
+			// enable disabled breakpoints
+			CBreakPoints::ChangeBreakPoint(curAddress,true);
+		} else if (!toggleEnabled && CBreakPoints::GetBreakPointCondition(curAddress) != NULL)
+		{
+			// don't just delete a breakpoint with a custom condition
+			int ret = MessageBox(wnd,L"This breakpoint has a custom condition.\nDo you want to remove it?",L"Confirmation",MB_YESNO);
+			if (ret == IDYES)
+				CBreakPoints::RemoveBreakPoint(curAddress);
+		} else if (toggleEnabled)
+		{
+			// disable breakpoint
+			CBreakPoints::ChangeBreakPoint(curAddress,false);
+		} else {
+			// otherwise just remove breakpoint
+			CBreakPoints::RemoveBreakPoint(curAddress);
+		}
+	} else {
+		CBreakPoints::AddBreakPoint(curAddress);
+	}
+}
 
 void CtrlDisAsmView::onMouseDown(WPARAM wParam, LPARAM lParam, int button)
 {
-	int x = LOWORD(lParam); 
-	int y = HIWORD(lParam); 
-	if (x>16)
+	dontRedraw = false;
+	int x = LOWORD(lParam);
+	int y = HIWORD(lParam);
+
+	u32 newAddress = yToAddress(y);
+	bool extend = KeyDownAsync(VK_SHIFT);
+	if (button == 1)
 	{
-		oldSelection=selection;
-		selection=yToAddress(y);
-		SetCapture(wnd);
-		bool oldselecting=selecting;
-		selecting=true;
-		if (!oldselecting || (selection!=oldSelection))
-			redraw();
+		if (newAddress == curAddress && hasFocus)
+		{
+			toggleBreakpoint();
+		}
 	}
-	else
+	else if (button == 2)
 	{
-		debugger->toggleBreakpoint(yToAddress(y));
-		redraw();
+		// Maintain the current selection if right clicking into it.
+		if (newAddress >= selectRangeStart && newAddress < selectRangeEnd)
+			extend = true;
 	}
+	setCurAddress(newAddress, extend);
+
+	SetFocus(wnd);
+	redraw();
+}
+
+void CtrlDisAsmView::copyInstructions(u32 startAddr, u32 endAddr, bool withDisasm)
+{
+	int count = (endAddr - startAddr) / instructionSize;
+
+	char opcode[64], arguments[256];
+	int space = count * (withDisasm ? 256 : 32);
+	char *temp = new char[space];
+
+	char *p = temp, *end = temp + space;
+	for (u32 pos = startAddr; pos < endAddr; pos += instructionSize)
+	{
+		if (withDisasm)
+		{
+			const char *dizz = debugger->disasm(pos, instructionSize);
+			parseDisasm(dizz, opcode, arguments);
+			p += snprintf(p, end - p, "%s\t%s", opcode, arguments);
+		}
+		else
+			p += snprintf(p, end - p, "%08X", debugger->readMemory(pos));
+
+		// Don't leave a trailing newline.
+		if (pos + instructionSize < endAddr)
+			p += snprintf(p, end - p, "\r\n");
+	}
+
+	W32Util::CopyTextToClipboard(wnd, temp);
+	delete [] temp;
 }
 
 void CtrlDisAsmView::onMouseUp(WPARAM wParam, LPARAM lParam, int button)
 {
-	if (button==2)
+	if (button == 1)
+	{
+		int x = LOWORD(lParam);
+		int y = HIWORD(lParam);
+		setCurAddress(yToAddress(y), KeyDownAsync(VK_SHIFT));
+		redraw();
+	}
+	else if (button == 2)
 	{
 		//popup menu?
 		POINT pt;
@@ -447,123 +1032,378 @@ void CtrlDisAsmView::onMouseUp(WPARAM wParam, LPARAM lParam, int button)
 		switch(TrackPopupMenuEx(GetSubMenu(g_hPopupMenus,1),TPM_RIGHTBUTTON|TPM_RETURNCMD,pt.x,pt.y,wnd,0))
 		{
 		case ID_DISASM_GOTOINMEMORYVIEW:
-			for (int i=0; i<numCPUs; i++)
-				if (memoryWindow[i])
-					memoryWindow[i]->Goto(selection);
+			SendMessage(GetParent(wnd),WM_DEB_GOTOHEXEDIT,curAddress,0);
 			break;
 		case ID_DISASM_ADDHLE:
 			break;
 		case ID_DISASM_TOGGLEBREAKPOINT:
-			debugger->toggleBreakpoint(selection);
+			toggleBreakpoint();
 			redraw();
 			break;
+		case ID_DISASM_ASSEMBLE:
+			assembleOpcode(curAddress,"");
+			break;
 		case ID_DISASM_COPYINSTRUCTIONDISASM:
-			W32Util::CopyTextToClipboard(wnd, debugger->disasm(selection,align));
+			copyInstructions(selectRangeStart, selectRangeEnd, true);
 			break;
 		case ID_DISASM_COPYADDRESS:
 			{
 				char temp[16];
-				sprintf(temp,"%08x",selection);
+				sprintf(temp,"%08X",curAddress);
 				W32Util::CopyTextToClipboard(wnd, temp);
 			}
 			break;
 		case ID_DISASM_SETPCTOHERE:
-			debugger->setPC(selection);
+			debugger->setPC(curAddress);
 			redraw();
 			break;
 		case ID_DISASM_FOLLOWBRANCH:
-			{
-				const char *temp = debugger->disasm(selection,align);
-				const char *mojs=strstr(temp,"->$");
-				if (mojs)
-				{
-					u32 dest;
-					sscanf(mojs+3,"%08x",&dest);
-					if (dest)
-					{
-						marker = selection;
-						gotoAddr(dest);
-					}
-				}
-			}
+			followBranch();
 			break;
 		case ID_DISASM_COPYINSTRUCTIONHEX:
-			{
-				char temp[24];
-				sprintf(temp,"%08x",debugger->readMemory(selection));
-				W32Util::CopyTextToClipboard(wnd,temp);
-			}
+			copyInstructions(selectRangeStart, selectRangeEnd, false);
 			break;
 		case ID_DISASM_RUNTOHERE:
 			{
-				debugger->setBreakpoint(selection);
-				debugger->runToBreakpoint();
+				SendMessage(GetParent(wnd), WM_COMMAND, ID_DEBUG_RUNTOLINE, 0);
 				redraw();
 			}
 			break;
 		case ID_DISASM_RENAMEFUNCTION:
 			{
-				int sym = symbolMap.GetSymbolNum(selection);
+				int sym = symbolMap.GetSymbolNum(curAddress);
 				if (sym != -1)
 				{
 					char name[256];
-					char newname[256];
+					std::string newname;
 					strncpy_s(name, symbolMap.GetSymbolName(sym),_TRUNCATE);
-					if (InputBox_GetString(MainWindow::GetHInstance(), MainWindow::GetHWND(), "New function name", name, newname))
+					if (InputBox_GetString(MainWindow::GetHInstance(), MainWindow::GetHWND(), L"New function name", name, newname))
 					{
-						symbolMap.SetSymbolName(sym,newname);
+						symbolMap.SetSymbolName(sym, newname.c_str());
 						redraw();
-						SendMessage(GetParent(wnd),WM_USER+1,0,0);
+						SendMessage(GetParent(wnd),WM_DEB_MAPLOADED,0,0);
 					}
 				}
 				else
 				{
-					MessageBox(MainWindow::GetHWND(),"No symbol selected",0,0);
+					MessageBox(MainWindow::GetHWND(), L"No symbol selected",0,0);
 				}
 			}
+			break;
+		case ID_DISASM_REMOVEFUNCTION:
+			{
+				char statusBarTextBuff[256];
+				int sym = symbolMap.GetSymbolNum(curAddress);
+				if (sym != -1)
+				{
+					u32 funcBegin = symbolMap.GetAddress(sym);
+					int prev = symbolMap.GetSymbolNum(funcBegin - 1);
+					if (prev != -1)
+					{
+						int expandedSize = symbolMap.GetSymbolSize(prev) + symbolMap.GetSymbolSize(sym);
+						symbolMap.SetSymbolSize(prev, expandedSize);
+					}
+					symbolMap.RemoveSymbolNum(sym);
+					SendMessage(GetParent(wnd), WM_DEB_MAPLOADED, 0, 0);
+				}
+				else
+				{
+					snprintf(statusBarTextBuff,256, "WARNING: unable to find function symbol here");
+					SendMessage(GetParent(wnd), WM_DEB_SETSTATUSBARTEXT, 0, (LPARAM) statusBarTextBuff);
+				}
+				redraw();
+			}
+			break;
+		case ID_DISASM_ADDFUNCTION:
+			{
+				char statusBarTextBuff[256];
+				int sym = symbolMap.GetSymbolNum(curAddress);
+				if (sym != -1)
+				{
+					if (symbolMap.GetAddress(sym) == curAddress)
+					{
+						snprintf(statusBarTextBuff,256, "WARNING: There's already a function entry point at this adress");
+						SendMessage(GetParent(wnd), WM_DEB_SETSTATUSBARTEXT, 0, (LPARAM) statusBarTextBuff);
+					}
+					else
+					{
+						char symname[128];
+						int prevSize = symbolMap.GetSymbolSize(sym);
+						u32 prevAddr = symbolMap.GetSymbolAddr(sym);
+						int newSize = curAddress - prevAddr;
+						symbolMap.SetSymbolSize(sym, newSize);
+						newSize = prevSize - newSize;
+						snprintf(symname,128,"u_un_%08X",curAddress);
+						symbolMap.AddSymbol(symname, curAddress, newSize, ST_FUNCTION);
+						symbolMap.SortSymbols();
+						SendMessage(GetParent(wnd), WM_DEB_MAPLOADED, 0, 0);
+					}
+				}
+				else
+				{
+					snprintf(statusBarTextBuff, 256, "WARNING: unable to add function symbol here");
+					SendMessage(GetParent(wnd), WM_DEB_SETSTATUSBARTEXT, 0, (LPARAM) statusBarTextBuff);
+				}
+				redraw();
+			}
+			break;
+		case ID_DISASM_DISASSEMBLETOFILE:
+			disassembleToFile();
 			break;
 		}
 		return;
 	}
-	int x = LOWORD(lParam); 
-	int y = HIWORD(lParam); 
-	if (x>16)
-	{
-		curAddress=yToAddress(y);
-		selecting=false;
-		ReleaseCapture();
-		redraw();
-	}
+
+	redraw();
 }
 
 void CtrlDisAsmView::onMouseMove(WPARAM wParam, LPARAM lParam, int button)
 {
-	if (button&1)
+	if ((button & 1) != 0)
 	{
-		int x = LOWORD(lParam); 
-		int y = (signed short)HIWORD(lParam); 
-		if (x>16)
-		{
-			if (y<0)
-			{
-				curAddress-=align;
-				redraw();
-			}
-			else if (y>rect.bottom)
-			{
-				curAddress+=align;
-				redraw();
-			}
-			else
-				onMouseDown(wParam,lParam,1);
-		}
+		int x = LOWORD(lParam);
+		int y = HIWORD(lParam);
+		setCurAddress(yToAddress(y), KeyDownAsync(VK_SHIFT));
+		// TODO: Perhaps don't do this every time, but on a timer?
+		redraw();
 	}
 }	
 
-
-int CtrlDisAsmView::yToAddress(int y)
+void CtrlDisAsmView::updateStatusBarText()
 {
-	int ydiff=y-rect.bottom/2-rowHeight/2;
-	ydiff=(int)(floorf((float)ydiff / (float)rowHeight))+1;
-	return curAddress + ydiff * align;
+	char text[512];
+	MIPSAnalyst::MipsOpcodeInfo info = MIPSAnalyst::GetOpcodeInfo(debugger,curAddress);
+	
+	text[0] = 0;
+	if (info.isDataAccess)
+	{
+		if (!Memory::IsValidAddress(info.dataAddress))
+		{
+			sprintf(text,"Invalid address %08X",info.dataAddress);
+		} else {
+			switch (info.dataSize)
+			{
+			case 1:
+				sprintf(text,"[%08X] = %02X",info.dataAddress,Memory::Read_U8(info.dataAddress));
+				break;
+			case 2:
+				sprintf(text,"[%08X] = %04X",info.dataAddress,Memory::Read_U16(info.dataAddress));
+				break;
+			case 4:
+				// TODO: Could also be a float...
+				{
+					u32 data = Memory::Read_U32(info.dataAddress);
+					const char* addressSymbol = debugger->findSymbolForAddress(data);
+					if (addressSymbol)
+					{
+						sprintf(text,"[%08X] = %s (%08X)",info.dataAddress,addressSymbol,data);
+					} else {
+						sprintf(text,"[%08X] = %08X",info.dataAddress,data);
+					}
+					break;
+				}
+			case 16:
+				// TODO: vector
+				break;
+			}
+		}
+	}
+
+	if (info.isBranch)
+	{
+		const char* addressSymbol = debugger->findSymbolForAddress(info.branchTarget);
+		if (addressSymbol == NULL)
+		{
+			sprintf(text,"%08X",info.branchTarget);
+		} else {
+			sprintf(text,"%08X = %s",info.branchTarget,addressSymbol);
+		}
+	}
+
+	SendMessage(GetParent(wnd),WM_DEB_SETSTATUSBARTEXT,0,(LPARAM)text);
+}
+
+u32 CtrlDisAsmView::yToAddress(int y)
+{
+	int line = y/rowHeight;
+	return windowStart + line*instructionSize;
+}
+
+void CtrlDisAsmView::calculatePixelPositions()
+{
+	pixelPositions.addressStart = 16;
+	pixelPositions.opcodeStart = pixelPositions.addressStart + 18*charWidth;
+	pixelPositions.argumentsStart = pixelPositions.opcodeStart + 9*charWidth;
+	pixelPositions.arrowsStart = pixelPositions.argumentsStart + 30*charWidth;
+}
+
+void CtrlDisAsmView::search(bool continueSearch)
+{
+	u32 searchAddress;
+
+	if (continueSearch == false || searchQuery[0] == 0)
+	{
+		if (InputBox_GetString(MainWindow::GetHInstance(),MainWindow::GetHWND(),L"Search for:","",searchQuery) == false
+			|| searchQuery[0] == 0)
+		{
+			SetFocus(wnd);
+			return;
+		}
+
+		for (size_t i = 0; i < searchQuery.size(); i++)
+		{
+			searchQuery[i] = tolower(searchQuery[i]);
+		}
+		SetFocus(wnd);
+		searchAddress = curAddress+instructionSize;
+	} else {
+		searchAddress = matchAddress+instructionSize;
+	}
+
+	// limit address to sensible ranges
+	if (searchAddress < 0x04000000) searchAddress = 0x04000000;
+	if (searchAddress >= 0x04200000 && searchAddress < 0x08000000) searchAddress = 0x08000000;
+	if (searchAddress >= 0x0A000000) {	
+		MessageBox(wnd,L"Not found",L"Search",MB_OK);
+		return;
+	}
+
+	searching = true;
+	redraw();	// so the cursor is disabled
+	while (searchAddress < 0x0A000000)
+	{
+		char addressText[64],opcode[64],arguments[256];
+		const char *dis = debugger->disasm(searchAddress, instructionSize);
+		parseDisasm(dis,opcode,arguments);
+		getDisasmAddressText(searchAddress,addressText,true);
+
+		char merged[512];
+		int mergePos = 0;
+
+		// I'm doing it manually to convert everything to lowercase at the same time
+		for (int i = 0; addressText[i] != 0; i++) merged[mergePos++] = tolower(addressText[i]);
+		merged[mergePos++] = ' ';
+		for (int i = 0; opcode[i] != 0; i++) merged[mergePos++] = tolower(opcode[i]);
+		merged[mergePos++] = ' ';
+		for (int i = 0; arguments[i] != 0; i++) merged[mergePos++] = tolower(arguments[i]);
+		merged[mergePos] = 0;
+
+		// match!
+		if (strstr(merged, searchQuery.c_str()) != NULL)
+		{
+			matchAddress = searchAddress;
+			searching = false;
+			gotoAddr(searchAddress);
+			return;
+		}
+
+		// cancel search
+		if ((searchAddress % 256) == 0 && KeyDownAsync(VK_ESCAPE))
+		{
+			searching = false;
+			return;
+		}
+
+		searchAddress += instructionSize;
+		if (searchAddress >= 0x04200000 && searchAddress < 0x08000000) searchAddress = 0x08000000;
+	}
+	
+	MessageBox(wnd,L"Not found",L"Search",MB_OK);
+	searching = false;
+}
+
+void CtrlDisAsmView::disassembleToFile()
+{
+	wchar_t fileName[MAX_PATH];
+	u32 size;
+
+	// get size
+	if (executeExpressionWindow(wnd,debugger,size) == false) return;
+	if (size == 0 || size > 10*1024*1024)
+	{
+		MessageBox(wnd,L"Invalid size!",L"Error",MB_OK);
+		return;
+	}
+
+	// get file name
+	OPENFILENAME ofn;
+	ZeroMemory( &ofn , sizeof( ofn));
+	ofn.lStructSize = sizeof ( ofn );
+	ofn.hwndOwner = NULL ;
+	ofn.lpstrFile = fileName ;
+	ofn.lpstrFile[0] = '\0';
+	ofn.nMaxFile = sizeof( fileName );
+	ofn.lpstrFilter = L"All files";
+	ofn.nFilterIndex = 1;
+	ofn.lpstrFileTitle = NULL ;
+	ofn.nMaxFileTitle = 0 ;
+	ofn.lpstrInitialDir = NULL ;
+	ofn.Flags = OFN_PATHMUSTEXIST|OFN_FILEMUSTEXIST|OFN_OVERWRITEPROMPT;
+
+	if (GetSaveFileName(&ofn) == false) return;
+
+	FILE* output = _wfopen(fileName, L"w");
+	if (output == NULL) {
+		MessageBox(wnd,L"Could not open file!",L"Error",MB_OK);
+		return;
+	}
+
+	// gather all branch targets without labels
+	std::set<u32> branchAddresses;
+	for (u32 i = 0; i < size; i += instructionSize)
+	{
+		char opcode[64],arguments[256];
+		const char *dis = debugger->disasm(curAddress+i, instructionSize);
+		parseDisasm(dis,opcode,arguments);
+
+		if (branchTarget != -1 && debugger->findSymbolForAddress(branchTarget) == NULL)
+		{
+			if (branchAddresses.find(branchTarget) == branchAddresses.end())
+			{
+				branchAddresses.insert(branchTarget);
+			}
+		}
+	}
+
+	bool previousLabel = true;
+	for (u32 i = 0; i < size; i += instructionSize)
+	{
+		u32 disAddress = curAddress+i;
+
+		char addressText[64],opcode[64],arguments[256];
+		const char *dis = debugger->disasm(disAddress, instructionSize);
+		parseDisasm(dis,opcode,arguments);
+		bool isLabel = getDisasmAddressText(disAddress,addressText,false);
+
+		if (isLabel)
+		{
+			if (!previousLabel) fprintf(output,"\n");
+			fprintf(output,"%s\n\n",addressText);
+		} else if (branchAddresses.find(disAddress) != branchAddresses.end())
+		{
+			if (!previousLabel) fprintf(output,"\n");
+			fprintf(output,"pos_%08X:\n\n",disAddress);
+		}
+
+		if (branchTarget != -1 && debugger->findSymbolForAddress(branchTarget) == NULL)
+		{
+			char* str = strstr(arguments,"0x");
+			sprintf(str,"pos_%08X",branchTarget);
+		}
+
+		fprintf(output,"\t%s\t%s\n",opcode,arguments);
+		previousLabel = isLabel;
+	}
+
+	fclose(output);
+	MessageBox(wnd,L"Finished!",L"Done",MB_OK);
+}
+
+void CtrlDisAsmView::getOpcodeText(u32 address, char* dest)
+{
+	char opcode[64];
+	char arguments[256];
+	const char *dis = debugger->disasm(address, instructionSize);
+	parseDisasm(dis,opcode,arguments);
+	sprintf(dest,"%s  %s",opcode,arguments);
 }

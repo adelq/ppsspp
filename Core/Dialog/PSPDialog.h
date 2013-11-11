@@ -17,27 +17,32 @@
 
 #pragma once
 
+#include "Globals.h"
+#include "Common/Common.h"
+#include "Core/Config.h"
 
-#include "../Config.h"
-#include "../../Common/ChunkFile.h"
+class PointerWrap;
 
 #define SCE_UTILITY_DIALOG_RESULT_SUCCESS				0
 #define SCE_UTILITY_DIALOG_RESULT_CANCEL				1
 #define SCE_UTILITY_DIALOG_RESULT_ABORT					2
 
-typedef struct
-{
-	unsigned int size;	/** Size of the structure */
-	int language;		/** Language */
-	int buttonSwap;		/** Set to 1 for X/O button swap */
-	int graphicsThread;	/** Graphics thread priority */
-	int accessThread;	/** Access/fileio thread priority (SceJobThread) */
-	int fontThread;		/** Font thread priority (ScePafThread) */
-	int soundThread;	/** Sound thread priority */
-	int result;			/** Result */
-	int reserved[4];	/** Set to 0 */
+const int SCE_ERROR_UTILITY_INVALID_STATUS         = 0x80110001;
+const int SCE_ERROR_UTILITY_INVALID_PARAM_SIZE     = 0x80110004;
+const int SCE_ERROR_UTILITY_WRONG_TYPE             = 0x80110005;
 
-} pspUtilityDialogCommon;
+struct pspUtilityDialogCommon
+{
+	u32_le size;            /** Size of the structure */
+	s32_le language;        /** Language */
+	s32_le buttonSwap;      /** Set to 1 for X/O button swap */
+	s32_le graphicsThread;  /** Graphics thread priority */
+	s32_le accessThread;    /** Access/fileio thread priority (SceJobThread) */
+	s32_le fontThread;      /** Font thread priority (ScePafThread) */
+	s32_le soundThread;     /** Sound thread priority */
+	s32_le result;          /** Result */
+	s32_le reserved[4];     /** Set to 0 */
+};
 
 
 class PSPDialog
@@ -46,9 +51,10 @@ public:
 	PSPDialog();
 	virtual ~PSPDialog();
 
-	virtual int Update();
-	virtual int Shutdown();
+	virtual int Update(int animSpeed) = 0;
+	virtual int Shutdown(bool force = false);
 	virtual void DoState(PointerWrap &p);
+	virtual pspUtilityDialogCommon *GetCommonParam();
 
 	enum DialogStatus
 	{
@@ -59,15 +65,38 @@ public:
 		SCE_UTILITY_STATUS_SHUTDOWN 	= 4
 	};
 
+	enum DialogStockButton
+	{
+		DS_BUTTON_NONE   = 0x00,
+		DS_BUTTON_OK     = 0x01,
+		DS_BUTTON_CANCEL = 0x02,
+		DS_BUTTON_BOTH   = 0x03,
+	};
+
 	DialogStatus GetStatus();
 
 	void StartDraw();
 	void EndDraw();
 protected:
 	bool IsButtonPressed(int checkButton);
-	void DisplayMessage(std::string text);
+	void DisplayButtons(int flags);
+
+	void StartFade(bool fadeIn_);
+	void UpdateFade(int animSpeed);
+	u32 CalcFadedColor(u32 inColor);
+
 	DialogStatus status;
 
 	unsigned int lastButtons;
 	unsigned int buttons;
+
+	float fadeTimer;
+	bool isFading;
+	bool fadeIn;
+	u32 fadeValue;
+
+	int okButtonImg;
+	int cancelButtonImg;
+	int okButtonFlag;
+	int cancelButtonFlag;
 };

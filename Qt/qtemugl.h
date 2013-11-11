@@ -2,34 +2,33 @@
 #define QTEMUGL_H
 
 #include "gfx_es2/glsl_program.h"
+#include "input/input_state.h"
 #include <QGLWidget>
-#include "EmuThread.h"
+#include "QtHost.h"
 
 class QtEmuGL : public QGLWidget
 {
 	Q_OBJECT
 public:
-	explicit QtEmuGL(QWidget *parent = 0);
+	explicit QtEmuGL(QWidget *parent = nullptr);
+	~QtEmuGL() {
+		NativeShutdownGraphics();
+	}
+
 	void init(InputState* inputState);
-
-	void SetRunning(bool value);
-
-	void start_rendering();
-	void stop_rendering();
+signals:
+	void doubleClick();
 protected:
 	void initializeGL();
-
 	void paintGL();
-	void resizeEvent(QResizeEvent *evt);
-	void paintEvent(QPaintEvent *);
-	void closeEvent(QCloseEvent *evt);
-signals:
-	
-public slots:
+	void mouseDoubleClickEvent(QMouseEvent *);
+	void mousePressEvent(QMouseEvent *e);
+	void mouseReleaseEvent(QMouseEvent *e);
+	void mouseMoveEvent(QMouseEvent *e);
+	void wheelEvent(QWheelEvent *e);
 
 private:
-	bool running_;
-	EmuThread thread;
+	InputState *input_state;
 };
 
 #endif // QTEMUGL_H

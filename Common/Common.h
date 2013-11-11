@@ -24,14 +24,21 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
+
+#ifdef _MSC_VER
+#pragma warning (disable:4100)
+#endif
+
+#ifdef __arm__
+#if !defined(ARM)
+#define ARM
+#endif
+#endif
 
 #if defined(ARM)
 #define _M_ARM32
 #endif
-
-// SVN version number
-extern const char *scm_rev_str;
-extern const char *netplay_dolphin_ver;
 
 // Force enable logging in the right modes. For some reason, something had changed
 // so that debugfast no longer logged.
@@ -64,11 +71,6 @@ private:
 #undef STACKALIGN
 #define STACKALIGN __attribute__((__force_align_arg_pointer__))
 #endif
-// We use wxWidgets on OS X only if it is version 2.9+ with Cocoa support.
-#ifdef __WXOSX_COCOA__
-#define HAVE_WX 1
-#define USE_WX 1	// Use wxGLCanvas
-#endif
 
 #elif defined _WIN32
 
@@ -77,23 +79,16 @@ private:
 		#error needs at least version 1000 of MSC
 	#endif
 
-	#define NOMINMAX
-
 // Memory leak checks
 	#define CHECK_HEAP_INTEGRITY()
 
 // Alignment
-	#define GC_ALIGNED16(x) __declspec(align(16)) x
+	#define MEMORY_ALIGNED16(x) __declspec(align(16)) x
 	#define GC_ALIGNED32(x) __declspec(align(32)) x
 	#define GC_ALIGNED64(x) __declspec(align(64)) x
 	#define GC_ALIGNED128(x) __declspec(align(128)) x
 	#define GC_ALIGNED16_DECL(x) __declspec(align(16)) x
 	#define GC_ALIGNED64_DECL(x) __declspec(align(64)) x
-
-// Since it is always around on windows
-	#define HAVE_WX 1
-
-	#define HAVE_PORTAUDIO 1
 
 // Debug definitions
 	#if defined(_DEBUG)
@@ -124,7 +119,7 @@ private:
 #endif
 
 #define __forceinline inline __attribute__((always_inline))
-#define GC_ALIGNED16(x) __attribute__((aligned(16))) x
+#define MEMORY_ALIGNED16(x) __attribute__((aligned(16))) x
 #define GC_ALIGNED32(x) __attribute__((aligned(32))) x
 #define GC_ALIGNED64(x) __attribute__((aligned(64))) x
 #define GC_ALIGNED128(x) __attribute__((aligned(128))) x
@@ -142,10 +137,6 @@ private:
 #define __chdir chdir
 #endif
 
-// Dummy macro for marking translatable strings that can not be immediately translated.
-// wxWidgets does not have a true dummy macro for this.
-#define _trans(a) a
-
 #if defined __GNUC__
 # if defined __SSE4_2__
 #  define _M_SSE 0x402
@@ -156,37 +147,50 @@ private:
 # elif defined __SSE3__
 #  define _M_SSE 0x300
 # endif
-#elif (_MSC_VER >= 1500) || __INTEL_COMPILER // Visual Studio 2008
+#elif ((_MSC_VER >= 1500) || __INTEL_COMPILER) // Visual Studio 2008
 # define _M_SSE 0x402
 #endif
 
 
 #ifdef _MSC_VER
+inline unsigned long long bswap64(unsigned long long x) { return _byteswap_uint64(x); }
 inline unsigned int bswap32(unsigned int x) { return _byteswap_ulong(x); }
 inline unsigned int bswap16(unsigned int x) { return _byteswap_ushort(x); }
 #else
 // TODO: speedup
-inline unsigned int bswap32(unsigned int x) { return (x >> 24) | ((x & 0xFF0000) >> 8) | ((x & 0xFF00) << 8) | (x << 24);}
 inline unsigned short bswap16(unsigned short x) { return (x << 8) | (x >> 8); }
+inline unsigned int bswap32(unsigned int x) { return (x >> 24) | ((x & 0xFF0000) >> 8) | ((x & 0xFF00) << 8) | (x << 24);}
+inline unsigned long long bswap64(unsigned long long x) {return ((unsigned long long)bswap32(x) << 32) | bswap32(x >> 32); }
 #endif
 
-
-// Host communication.
-enum HOST_COMM
+inline float bswapf( float f )
 {
-	// Begin at 10 in case there is already messages with wParam = 0, 1, 2 and so on
-	WM_USER_STOP = 10,
-	WM_USER_CREATE,
-	WM_USER_SETCURSOR,
-	WM_USER_KEYDOWN,
-};
+  union
+  {
+    float f;
+    unsigned int u32;
+  } dat1, dat2;
 
-// Used for notification on emulation state
-enum EMUSTATE_CHANGE
+  dat1.f = f;
+  dat2.u32 = bswap32(dat1.u32);
+
+  return dat2.f;
+}
+
+inline double bswapd( double f )
 {
-	EMUSTATE_CHANGE_PLAY = 1,
-	EMUSTATE_CHANGE_PAUSE,
-	EMUSTATE_CHANGE_STOP
-};
+  union
+  {
+    double f;
+    unsigned long long u64;
+  } dat1, dat2;
+
+  dat1.f = f;
+  dat2.u64 = bswap64(dat1.u64);
+
+  return dat2.f;
+}
+
+#include "Swap.h"
 
 #endif // _COMMON_H_

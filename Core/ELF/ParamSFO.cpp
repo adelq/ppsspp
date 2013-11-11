@@ -17,7 +17,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include "../Globals.h"
 #include "ParamSFO.h"
 
 struct Header
@@ -108,14 +107,14 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size)
 				// Unsigned int
 				const u32 *data = (const u32 *)(data_start + indexTables[i].data_table_offset);
 				SetValue(key,*data,indexTables[i].param_max_len);
-				DEBUG_LOG(LOADER, "%s %08x", key, *data);
+				VERBOSE_LOG(LOADER, "%s %08x", key, *data);
 			}
 			break;
 		case 0x0004:
 			// Special format UTF-8
 			{
 				const u8 *utfdata = (const u8 *)(data_start + indexTables[i].data_table_offset);
-				DEBUG_LOG(LOADER, "%s %s", key, utfdata);
+				VERBOSE_LOG(LOADER, "%s %s", key, utfdata);
 				SetValue(key, utfdata, indexTables[i].param_len, indexTables[i].param_max_len);
 			}
 			break;
@@ -123,14 +122,39 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size)
 			// Regular UTF-8
 			{
 				const char *utfdata = (const char *)(data_start + indexTables[i].data_table_offset);
-				DEBUG_LOG(LOADER, "%s %s", key, utfdata);
-				SetValue(key,std::string(utfdata,indexTables[i].param_len),indexTables[i].param_max_len);
+				VERBOSE_LOG(LOADER, "%s %s", key, utfdata);
+				SetValue(key,std::string(utfdata /*, indexTables[i].param_len*/), indexTables[i].param_max_len);
 			}
 			break;
 		}
 	}
 
 	return true;
+}
+
+int ParamSFOData::GetDataOffset(const u8 *paramsfo, std::string dataName)
+{
+	const Header *header = (const Header *)paramsfo;
+	if (header->magic != 0x46535000)
+		return -1;
+	if (header->version != 0x00000101)
+		WARN_LOG(LOADER, "Unexpected SFO header version: %08x", header->version);
+
+	const IndexTable *indexTables = (const IndexTable *)(paramsfo + sizeof(Header));
+
+	const u8 *key_start = paramsfo + header->key_table_start;
+	int data_start = header->data_table_start;
+
+	for (u32 i = 0; i < header->index_table_entries; i++)
+	{
+		const char *key = (const char *)(key_start + indexTables[i].key_table_offset);
+		if(std::string(key) == dataName)
+		{
+			return data_start + indexTables[i].data_table_offset;
+		}
+	}
+
+	return -1;
 }
 
 bool ParamSFOData::WriteSFO(u8 **paramsfo, size_t *size)
@@ -159,7 +183,7 @@ bool ParamSFOData::WriteSFO(u8 **paramsfo, size_t *size)
 	while((key_size%4)) key_size++;
 
 	header.key_table_start = sizeof(Header) + header.index_table_entries * sizeof(IndexTable);
-	header.data_table_start = header.key_table_start + key_size;
+	header.data_table_start = header.key_table_start + (u32)key_size;
 
 	total_size += sizeof(IndexTable) * header.index_table_entries;
 	total_size += key_size;
@@ -201,7 +225,7 @@ bool ParamSFOData::WriteSFO(u8 **paramsfo, size_t *size)
 		else if (it->second.type == VT_UTF8)
 		{
 			index_ptr->param_fmt = 0x0204;
-			index_ptr->param_len = it->second.s_value.size()+1;
+			index_ptr->param_len = (u32)it->second.s_value.size()+1;
 
 			memcpy(data_ptr,it->second.s_value.c_str(),index_ptr->param_len);
 			data_ptr[index_ptr->param_len] = 0;

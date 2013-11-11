@@ -18,8 +18,7 @@
 #pragma once
 
 #include "../../Globals.h"
-#include "../../Common/ChunkFile.h"
-#include <string>
+#include "ChunkFile.h"
 
 enum FileAccess
 {
@@ -44,12 +43,20 @@ enum FileType
 };
 
 
-class IHandleAllocator
-{
+class IHandleAllocator {
 public:
 	virtual ~IHandleAllocator() {}
 	virtual u32 GetNewHandle() = 0;
 	virtual void FreeHandle(u32 handle) = 0;
+};
+
+class SequentialHandleAllocator : public IHandleAllocator {
+public:
+	SequentialHandleAllocator() : handle_(1) {}
+	virtual u32 GetNewHandle() { return handle_++; }
+	virtual void FreeHandle(u32 handle) {}
+private:
+	int handle_;
 };
 
 struct PSPFileInfo
@@ -59,16 +66,22 @@ struct PSPFileInfo
 
 	void DoState(PointerWrap &p)
 	{
+		auto s = p.Section("PSPFileInfo", 1);
+		if (!s)
+			return;
+
 		p.Do(name);
 		p.Do(size);
 		p.Do(access);
 		p.Do(exists);
 		p.Do(type);
+		p.Do(atime);
+		p.Do(ctime);
 		p.Do(mtime);
 		p.Do(isOnSectorSystem);
 		p.Do(startSector);
 		p.Do(numSectors);
-		p.DoMarker("PSPFileInfo");
+		p.Do(sectorSize);
 	}
 
 	std::string name;
@@ -77,11 +90,14 @@ struct PSPFileInfo
 	bool exists;
 	FileType type;
 
+	tm atime;
+	tm ctime;
 	tm mtime;
 
 	bool isOnSectorSystem;
 	u32 startSector;
 	u32 numSectors;
+	u32 sectorSize;
 };
 
 
@@ -92,7 +108,7 @@ public:
 
 	virtual void DoState(PointerWrap &p) = 0;
 	virtual std::vector<PSPFileInfo> GetDirListing(std::string path) = 0;
-	virtual u32      OpenFile(std::string filename, FileAccess access) = 0;
+	virtual u32      OpenFile(std::string filename, FileAccess access, const char *devicename=NULL) = 0;
 	virtual void     CloseFile(u32 handle) = 0;
 	virtual size_t   ReadFile(u32 handle, u8 *pointer, s64 size) = 0;
 	virtual size_t   WriteFile(u32 handle, const u8 *pointer, s64 size) = 0;
@@ -101,8 +117,8 @@ public:
 	virtual bool     OwnsHandle(u32 handle) = 0;
 	virtual bool     MkDir(const std::string &dirname) = 0;
 	virtual bool     RmDir(const std::string &dirname) = 0;
-	virtual bool     RenameFile(const std::string &from, const std::string &to) = 0;
-	virtual bool     DeleteFile(const std::string &filename) = 0;
+	virtual int      RenameFile(const std::string &from, const std::string &to) = 0;
+	virtual bool     RemoveFile(const std::string &filename) = 0;
 	virtual bool     GetHostPath(const std::string &inpath, std::string &outpath) = 0;
 };
 
@@ -112,7 +128,7 @@ class EmptyFileSystem : public IFileSystem
 public:
 	virtual void DoState(PointerWrap &p) {}
 	std::vector<PSPFileInfo> GetDirListing(std::string path) {std::vector<PSPFileInfo> vec; return vec;}
-	u32      OpenFile(std::string filename, FileAccess access) {return 0;}
+	u32      OpenFile(std::string filename, FileAccess access, const char *devicename=NULL) {return 0;}
 	void     CloseFile(u32 handle) {}
 	size_t   ReadFile(u32 handle, u8 *pointer, s64 size) {return 0;}
 	size_t   WriteFile(u32 handle, const u8 *pointer, s64 size) {return 0;}
@@ -121,9 +137,9 @@ public:
 	bool     OwnsHandle(u32 handle) {return false;}
 	virtual bool MkDir(const std::string &dirname) {return false;}
 	virtual bool RmDir(const std::string &dirname) {return false;}
-	virtual bool RenameFile(const std::string &from, const std::string &to) {return false;}
-	virtual bool DeleteFile(const std::string &filename) {return false;}
-	virtual bool     GetHostPath(const std::string &inpath, std::string &outpath) {return false;}
+	virtual int RenameFile(const std::string &from, const std::string &to) {return -1;}
+	virtual bool RemoveFile(const std::string &filename) {return false;}
+	virtual bool GetHostPath(const std::string &inpath, std::string &outpath) {return false;}
 };
 
 

@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "Misc.h"
 #include "PropertySheet.h"
+#include "util/text/utf8.h"
 
 #include <commctrl.h>
 
@@ -82,8 +83,8 @@ namespace W32Util
 		if (icon) 
 			sheet.dwFlags |= PSH_USEHICON;
 
-		sheet.pszCaption = title.c_str();
-		sheet.nPages = list.size();
+		sheet.pszCaption = ConvertUTF8ToWString(title).c_str();
+		sheet.nPages = (UINT)list.size();
 		sheet.phpage = pages;
 		sheet.nStartPage = startpage;
 		sheet.pfnCallback = (PFNPROPSHEETCALLBACK)Callback;
